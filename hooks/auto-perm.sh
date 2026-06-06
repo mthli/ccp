@@ -19,12 +19,15 @@ INPUT="$(cat || true)" # always drain stdin
 
 DEC="$POLICY"
 
-# Even under allow, hard-deny a couple of irreversible Bash footguns.
+# Even under allow, hard-deny a few irreversible Bash footguns. This is a
+# best-effort heuristic, NOT a security boundary (the permission decision is) —
+# it catches the common shapes of rm -rf / rm --recursive / rm --force, mkfs,
+# fork bombs, dd-to-disk, and clobbering /dev/sd*, but is trivially evadable.
 if [[ "$POLICY" == "allow" ]]; then
   TOOL="$(jq -r '.tool_name // ""' <<<"$INPUT" 2>/dev/null || echo "")"
   if [[ "$TOOL" == "Bash" ]]; then
     CMD="$(jq -r '.tool_input.command // ""' <<<"$INPUT" 2>/dev/null || echo "")"
-    if grep -Eq 'rm[[:space:]]+-[a-z]*[rf]|mkfs|:\(\)\{|dd[[:space:]]+if=|>[[:space:]]*/dev/sd' <<<"$CMD"; then
+    if grep -Eq '\brm[[:space:]]+-[a-z]*[rf]|\brm[[:space:]]+--(recursive|force)|mkfs|:\(\)\{|dd[[:space:]]+if=|>[[:space:]]*/dev/sd' <<<"$CMD"; then
       DEC="deny"
     fi
   fi

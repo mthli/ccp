@@ -34,14 +34,18 @@ extract() {
   ' "$1" 2>/dev/null || true
 }
 
-# Stop fires the instant the answer message is created, but the JSONL line for
-# that final text can flush a few hundred ms later — reading immediately races
-# to an empty result. Re-read until the final block lands (bounded ~6s).
+# Stop fires the instant the answer message is created, but each content block is
+# its own JSONL line and they flush a few hundred ms apart — reading immediately
+# races to an empty (or partial) result. Re-read until the extract is non-empty
+# AND unchanged across one poll, so a multi-block final answer isn't captured
+# mid-flush and returned truncated. Bounded ~6s.
 LAST=""
 if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]]; then
+  PREV=""
   for _ in $(seq 1 30); do
     LAST="$(extract "$TRANSCRIPT")"
-    [[ -n "$LAST" ]] && break
+    [[ -n "$LAST" && "$LAST" == "$PREV" ]] && break
+    PREV="$LAST"
     sleep 0.2
   done
 fi

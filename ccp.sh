@@ -161,7 +161,9 @@ fi
 # hooks survive) and `-p`/`--print` (claude's headless mode — unsupported, since
 # ccp drives an interactive session and prints the answer itself). A linear walk
 # suffices: both flags are recognizable by name, so we never need to know the
-# arity of the other claude options we pass straight through.
+# arity of the other claude options we pass straight through. (Caveat: a bare
+# `--settings`/`-p`/`--print` is intercepted even in the rare case it's meant as
+# the value of a preceding claude flag — name matching can't tell the two apart.)
 CLAUDE_ARGS=()   # forwarded to claude verbatim
 USER_SETTINGS=() # --settings values (file path or JSON string), merged below
 print_warned=0
@@ -211,6 +213,19 @@ if [ -n "$missing" ]; then
 fi
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)/hooks"
+
+# Preflight the hooks too: they are as load-bearing as the deps above (auto-perm
+# emits the permission decision, dump-transcript drives the done sentinel), and a
+# missing or non-executable one fails silently mid-run — the TUI would block on a
+# permission box, or the done sentinel would never appear, hanging us forever.
+for hook in auto-perm.sh dump-transcript.sh; do
+  if [ ! -x "$HOOK_DIR/$hook" ]; then
+    echo "ccp.sh: required hook not found or not executable: $HOOK_DIR/$hook" >&2
+    echo "ccp.sh: ensure hooks/ sits beside ccp.sh and is executable (chmod +x)." >&2
+    exit 127
+  fi
+done
+
 RUNDIR="$(mktemp -d -t cc-run.XXXXXX)"
 SETTINGS="$RUNDIR/settings.json"
 OUT="$RUNDIR/output.txt"
@@ -220,6 +235,17 @@ SESSION="cc-$$"
 # Tunables (override via env if the TUI wording ever changes).
 CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"  # seconds to wait for the input box
 CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-0}" # seconds to wait for the answer; 0 = forever
+
+# `ask` defers each tool call to the TUI's permission box, but this session is
+# detached — no one is there to answer it. Combined with the default forever
+# answer-timeout, an `ask` run that hits a tool call hangs silently. Warn and
+# point at the attach path. (`! [ x -gt 0 ]` is true for 0 and non-numeric — the
+# same "effectively forever" test the answer-wait loop uses below.)
+if [ "$AUTO" = "ask" ] && ! [ "$CCP_ANSWER_TIMEOUT" -gt 0 ] 2>/dev/null; then
+  echo "ccp.sh: note: -p ask defers tool permissions to the TUI, but this session is" >&2
+  echo "ccp.sh: detached — attach with 'tmux attach -t $SESSION' to answer prompts," >&2
+  echo "ccp.sh: or it waits forever (set CCP_ANSWER_TIMEOUT to bound the wait)." >&2
+fi
 
 cleanup() {
   tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -234,15 +260,16 @@ trap 'exit 143' TERM
 
 # 1) Temp settings: PreToolUse auto-permission + Stop transcript dump. Hook paths
 #    are baked straight into the command lines (no env smuggling through tmux);
-#    each is single-quoted so a path with spaces survives when claude runs it.
+#    each is shell-quoted via shq so a path with spaces or quotes survives when
+#    claude runs it.
 #    Any user `--settings` (file or JSON, repeatable) is deep-merged underneath,
 #    but ccp's PreToolUse/Stop hooks always win: they ARE the mechanism (auto-perm
 #    suppresses the y/n box, dump-transcript drives the done sentinel), so a user
 #    hook for either of those two events is dropped while every other setting —
 #    including other hook events like PostToolUse — is kept.
 CCP_HOOKS="$(jq -n \
-  --arg auto "'$HOOK_DIR/auto-perm.sh' $AUTO" \
-  --arg stop "'$HOOK_DIR/dump-transcript.sh' '$OUT' '$DONE'" \
+  --arg auto "$(shq "$HOOK_DIR/auto-perm.sh") $AUTO" \
+  --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE")" \
   '{
     PreToolUse: [{matcher: "*", hooks: [{type: "command", command: $auto}]}],
     Stop: [{hooks: [{type: "command", command: $stop}]}]
@@ -369,6 +396,10 @@ done
 # 6) Emit result.
 if [ -f "$DONE" ]; then
   cat "$OUT"
+  # An empty answer (the turn ended with no final text — e.g. a trailing tool
+  # call) prints as nothing and exits 0, indistinguishable from success; flag it
+  # on stderr so the caller can tell "no answer" apart from a real empty one.
+  grep -q '[^[:space:]]' "$OUT" || echo "ccp.sh: warning: model produced no final text (empty answer)" >&2
 else
   echo "ERROR: timed out after ${CCP_ANSWER_TIMEOUT}s waiting for the answer" >&2
   exit 1
