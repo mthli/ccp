@@ -23,20 +23,34 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ccp.sh [options] "<prompt>"
+Usage: ccp.sh [ccp-options] "<prompt>" [-- <claude-options>...]
 
 Arguments:
   <prompt>                 Prompt to send (required; quote multi-line prompts).
+                           Must appear before `--`.
 
-Options:
+ccp options (before `--`):
   -p, --permission <mode>  Tool-permission mode: allow (default) | deny | ask.
   -e, --env KEY=VALUE      Set an env var for the launched session, injected via
                            `tmux new-session -e` (repeatable). claude and every
                            hook/subprocess it runs inherit it.
   -h, --help               Show this help and exit.
 
-Example:
-  ccp.sh -p deny -e KEY=VALUE "summarize README.md"
+claude passthrough (after `--`):
+  Everything after `--` is forwarded verbatim to the underlying `claude`, so you
+  can use claude's own options (--model, --add-dir, --mcp-config, ...). Two are
+  handled by ccp instead of being passed through:
+    --settings <file|json>   Deep-merged into ccp's generated settings
+                             (repeatable); ccp's own PreToolUse/Stop hooks win.
+    -p, --print              Ignored with a warning — claude's headless mode is
+                             unsupported (ccp drives an interactive session and
+                             prints the final answer itself). Use ccp's own
+                             -p/--permission for the tool-permission mode.
+
+Examples:
+  ccp.sh "summarize README.md"
+  ccp.sh -p deny "scan the repo" -- --model opus --add-dir /tmp
+  ccp.sh "review" -- --settings ./my-settings.json --mcp-config ./mcp.json
 EOF
 }
 
@@ -50,15 +64,26 @@ die() {
   exit 2
 }
 
-# Parse args. The prompt is the sole positional; everything else is a flag, so a
-# bare value like "deny" is unambiguously the prompt, not a mode. `--` ends opts.
+# Single-quote a string for safe reuse in a shell command line (tmux runs the
+# claude command via the shell). Embedded single quotes become the '\'' idiom,
+# so any path/arg — spaces, $, quotes — survives verbatim.
+shq() {
+  local q="'\''"
+  printf "'%s'" "${1//\'/$q}"
+}
+
+# Parse args. Before `--`: ccp's own flags + the sole positional prompt (a bare
+# value like "deny" is unambiguously the prompt, not a mode). `--` switches to
+# claude passthrough — every following token is collected verbatim and forwarded
+# to `claude` (the scan further down peels off the two flags ccp handles itself).
 PROMPT=""
 PROMPT_SET=0
 AUTO="allow" # tool-permission mode: allow (default) | deny | ask
 ENVS=()      # -e KEY=VALUE entries, injected via `tmux new-session -e`
+PASSTHRU=()  # raw tokens after `--`, headed for claude
 
 set_prompt() {
-  [ "$PROMPT_SET" -eq 0 ] || die "unexpected extra argument: $1"
+  [ "$PROMPT_SET" -eq 0 ] || die "unexpected extra argument: $1 (claude options go after --)"
   PROMPT="$1"
   PROMPT_SET=1
 }
@@ -93,21 +118,21 @@ while [ "$#" -gt 0 ]; do
     ;;
   --)
     shift
+    # Everything after `--` is claude passthrough; collect it untouched.
+    while [ "$#" -gt 0 ]; do
+      PASSTHRU+=("$1")
+      shift
+    done
     break
     ;;
   -?*)
-    die "unknown option: $1"
+    die "unknown ccp option: $1 (ccp flags: -p, -e, -h; claude options go after --)"
     ;;
   *)
     set_prompt "$1"
     shift
     ;;
   esac
-done
-# Anything after `--` is positional.
-while [ "$#" -gt 0 ]; do
-  set_prompt "$1"
-  shift
 done
 
 { [ "$PROMPT_SET" -eq 1 ] && [ -n "$PROMPT" ]; } || die "missing required <prompt> argument"
@@ -130,6 +155,45 @@ if [ "${#ENVS[@]}" -gt 0 ]; then
     esac
   done
 fi
+
+# Split the claude passthrough into args forwarded verbatim and the two flags ccp
+# handles itself: `--settings` (deep-merged into ccp's generated settings, so the
+# hooks survive) and `-p`/`--print` (claude's headless mode — unsupported, since
+# ccp drives an interactive session and prints the answer itself). A linear walk
+# suffices: both flags are recognizable by name, so we never need to know the
+# arity of the other claude options we pass straight through.
+CLAUDE_ARGS=()   # forwarded to claude verbatim
+USER_SETTINGS=() # --settings values (file path or JSON string), merged below
+print_warned=0
+i=0
+while [ "$i" -lt "${#PASSTHRU[@]}" ]; do
+  tok="${PASSTHRU[$i]}"
+  case "$tok" in
+  --settings)
+    j=$((i + 1))
+    [ "$j" -lt "${#PASSTHRU[@]}" ] || die "--settings requires a value (file path or JSON string)"
+    USER_SETTINGS+=("${PASSTHRU[$j]}")
+    i=$((i + 2))
+    ;;
+  --settings=*)
+    USER_SETTINGS+=("${tok#*=}")
+    i=$((i + 1))
+    ;;
+  -p | --print)
+    if [ "$print_warned" -eq 0 ]; then
+      echo "ccp.sh: ignoring '$tok' — claude's -p/--print (headless) is unsupported." >&2
+      echo "ccp.sh: ccp drives an interactive session and prints the final answer itself;" >&2
+      echo "ccp.sh: use ccp's own -p/--permission for the tool-permission mode." >&2
+      print_warned=1
+    fi
+    i=$((i + 1))
+    ;;
+  *)
+    CLAUDE_ARGS+=("$tok")
+    i=$((i + 1))
+    ;;
+  esac
+done
 
 # Preflight: every hard dependency must be on PATH. Checked up front so a missing
 # tool fails with one clear line instead of failing deep in the run: tmux would
@@ -168,24 +232,49 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# 1) Temp settings: PreToolUse auto-permission + Stop transcript dump.
-#    Paths baked straight into the command lines (no env smuggling through tmux).
-cat >"$SETTINGS" <<JSON
-{
-  "hooks": {
-    "PreToolUse": [
-      { "matcher": "*", "hooks": [
-        { "type": "command", "command": "'$HOOK_DIR/auto-perm.sh' $AUTO" }
-      ]}
-    ],
-    "Stop": [
-      { "hooks": [
-        { "type": "command", "command": "'$HOOK_DIR/dump-transcript.sh' '$OUT' '$DONE'" }
-      ]}
-    ]
-  }
-}
-JSON
+# 1) Temp settings: PreToolUse auto-permission + Stop transcript dump. Hook paths
+#    are baked straight into the command lines (no env smuggling through tmux);
+#    each is single-quoted so a path with spaces survives when claude runs it.
+#    Any user `--settings` (file or JSON, repeatable) is deep-merged underneath,
+#    but ccp's PreToolUse/Stop hooks always win: they ARE the mechanism (auto-perm
+#    suppresses the y/n box, dump-transcript drives the done sentinel), so a user
+#    hook for either of those two events is dropped while every other setting —
+#    including other hook events like PostToolUse — is kept.
+CCP_HOOKS="$(jq -n \
+  --arg auto "'$HOOK_DIR/auto-perm.sh' $AUTO" \
+  --arg stop "'$HOOK_DIR/dump-transcript.sh' '$OUT' '$DONE'" \
+  '{
+    PreToolUse: [{matcher: "*", hooks: [{type: "command", command: $auto}]}],
+    Stop: [{hooks: [{type: "command", command: $stop}]}]
+  }')"
+
+if [ "${#USER_SETTINGS[@]}" -eq 0 ]; then
+  jq -n --argjson ccp "$CCP_HOOKS" '{hooks: $ccp}' >"$SETTINGS"
+else
+  # Resolve each --settings value (existing path → file contents, else treat as
+  # an inline JSON string, matching claude's own rule), validate, then deep-merge
+  # in order (later wins) and overlay ccp's hooks last.
+  merge_inputs=()
+  for s in "${USER_SETTINGS[@]}"; do
+    if [ -f "$s" ]; then
+      content="$(cat "$s")"
+      label="file '$s'"
+    else
+      content="$s"
+      label="inline JSON"
+    fi
+    jq empty >/dev/null 2>&1 <<<"$content" || {
+      echo "ccp.sh: invalid --settings ($label): not valid JSON" >&2
+      exit 1
+    }
+    merge_inputs+=("$content")
+  done
+  printf '%s\n' "${merge_inputs[@]}" |
+    jq -s --argjson ccp "$CCP_HOOKS" '
+      reduce .[] as $s ({}; . * $s)
+      | .hooks = ((.hooks // {}) * $ccp)
+    ' >"$SETTINGS"
+fi
 
 # 2) Launch interactive claude in a detached tmux session. Each -e KEY=VALUE is
 #    injected via `tmux new-session -e`, which writes straight into the new
@@ -197,9 +286,19 @@ tmux_env=()
 if [ "${#ENVS[@]}" -gt 0 ]; then
   for kv in "${ENVS[@]}"; do tmux_env+=(-e "$kv"); done
 fi
+# Build the claude command line: always our merged --settings, then any
+# passthrough args (each shell-quoted so spaces/specials survive the shell tmux
+# runs it through). No positional prompt — claude launches interactive and the
+# prompt is pasted in step 4.
+claude_cmd="claude --settings $(shq "$SETTINGS")"
+if [ "${#CLAUDE_ARGS[@]}" -gt 0 ]; then
+  for a in "${CLAUDE_ARGS[@]}"; do
+    claude_cmd="$claude_cmd $(shq "$a")"
+  done
+fi
 tmux new-session -d -s "$SESSION" -x 220 -y 50 \
   ${tmux_env[@]+"${tmux_env[@]}"} \
-  "claude --settings '$SETTINGS'"
+  "$claude_cmd"
 
 # 3) Wait for the input box. Empirically the reliable signals are the mode hint
 #    "(shift+tab to cycle)" / "? for shortcuts" and the empty prompt line; a

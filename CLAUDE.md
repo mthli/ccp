@@ -11,15 +11,18 @@ Pure bash. No build, no package manager, no test suite. Dependencies: `tmux`, `j
 ## Commands
 
 ```bash
-./ccp.sh [-p allow|deny|ask] [-e KEY=VALUE]... "<prompt>"  # run headlessly; answer prints to stdout
+./ccp.sh [-p allow|deny|ask] [-e KEY=VALUE]... "<prompt>" [-- <claude-options>...]  # run headlessly
 ./ccp.sh --help                                            # usage
 ./ccp.sh "say hi"                                          # end-to-end smoke test (see below)
+./ccp.sh "review" -- --model opus --add-dir /tmp           # forward claude's own options
 shfmt -w ccp.sh hooks/*.sh                                 # format (.editorconfig: 2-space indent, LF)
 ```
 
 There is no test suite. Verify a change by running the script end-to-end (e.g. `./ccp.sh "say hi"`) — that is the only real test: it exercises the whole launch → readiness → prompt-feed → hook → extract pipeline, and bills a live subscription session (so you must be logged into `claude`).
 
-The prompt is the sole positional arg; everything else is a flag (so a bare `deny` is unambiguously the prompt). Permission mode (`-p`/`--permission`, default `allow`): `allow` auto-approves every tool call (dangerous Bash is still hard-denied), `deny` rejects everything, `ask` defers to the TUI's normal prompt. `-e`/`--env KEY=VALUE` (repeatable) sets an env var on the launched session via `tmux new-session -e`.
+Before `--`: the prompt is the sole positional arg; everything else is a ccp flag (so a bare `deny` is unambiguously the prompt), and an unrecognized `-flag` is an error. Permission mode (`-p`/`--permission`, default `allow`): `allow` auto-approves every tool call (dangerous Bash is still hard-denied), `deny` rejects everything, `ask` defers to the TUI's normal prompt. `-e`/`--env KEY=VALUE` (repeatable) sets an env var on the launched session via `tmux new-session -e`.
+
+After `--`: everything is forwarded **verbatim** to the underlying `claude`, so its own options (`--model`, `--add-dir`, `--mcp-config`, …) just work — no per-flag knowledge in ccp, so new claude flags need no ccp change. `--` was chosen over an inline arity table precisely because claude's variadic options (`--add-dir a b c`, `--tools`, `--mcp-config`, …) make inline prompt/value disambiguation impossible. Two passthrough flags are intercepted instead of forwarded: **`--settings <file|json>`** (repeatable) is deep-merged into ccp's generated settings — later values win, and ccp's own `PreToolUse`/`Stop` hooks always override the user's for those two events while every other setting (model, env, `PostToolUse`, …) is kept; **`-p`/`--print`** is dropped with a warning, since claude's headless mode is the very thing ccp replaces (use ccp's own `-p`/`--permission`).
 
 Env overrides: `CCP_READY_TIMEOUT` (default 60s, wait for input box) and `CCP_ANSWER_TIMEOUT` (default 0 = wait forever, since prompt complexity is unbounded).
 
@@ -28,8 +31,8 @@ Env overrides: `CCP_READY_TIMEOUT` (default 60s, wait for input box) and `CCP_AN
 Three files cooperate. `ccp.sh` is the orchestrator; the two hooks run *inside* the spawned Claude process and communicate back via files.
 
 **`ccp.sh`** — the orchestrator, in numbered steps:
-1. Writes a throwaway `--settings` JSON into a `mktemp -d` rundir, wiring two hooks (`PreToolUse` → `auto-perm.sh`, `Stop` → `dump-transcript.sh`). The user's real `~/.claude/settings.json` is never touched. Hook paths/args are baked straight into the command strings — nothing is smuggled through tmux env.
-2. Launches `claude --settings ...` in a detached tmux session, injecting any `-e KEY=VALUE` via `tmux new-session -e`.
+1. Writes a throwaway `--settings` JSON into a `mktemp -d` rundir, wiring two hooks (`PreToolUse` → `auto-perm.sh`, `Stop` → `dump-transcript.sh`). The user's real `~/.claude/settings.json` is never touched. Hook paths/args are baked straight into the command strings — nothing is smuggled through tmux env. Any passthrough `--settings` is deep-merged underneath this (via `jq`), with ccp's two hooks overlaid last so they win.
+2. Launches `claude --settings ...` (plus any passthrough args after `--`, each `shq`-quoted so spaces/specials survive the shell tmux runs the command through) in a detached tmux session, injecting any `-e KEY=VALUE` via `tmux new-session -e`. claude launches with **no** positional prompt — interactive — so the prompt is only ever pasted in step 4, never passed as a CLI arg.
 3. Polls `tmux capture-pane` until the input box is ready, dismissing the "trust this folder" dialog once if it appears.
 4. Sends the prompt via `load-buffer`/`paste-buffer` (newline-safe, so multi-line prompts don't submit early), then `Enter` separately.
 5. Blocks until the `Stop` hook drops a `done` sentinel file.
