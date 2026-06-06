@@ -4,7 +4,7 @@ Headless Claude Code automation without the headless mode 👀
 
 ## What it is
 
-`ccp` runs Claude Code like `claude -p` (feed it a prompt, get the final answer on stdout), but **bills your subscription instead of the Agent SDK credit pool**.
+`ccp` runs Claude Code like `claude -p` (feed a prompt, get the final answer on stdout), but **bills your subscription instead of the Agent SDK credit pool**.
 
 It does this by driving a real *interactive* Claude Code TUI inside a detached [tmux](https://github.com/tmux/tmux) session:
 it launches Claude, types in your prompt, auto-answers the permission prompts, and scrapes the final reply.
@@ -17,7 +17,7 @@ ccp.sh "..."  →  interactive TUI  →  subscription pool ✅
 
 ## Requirements
 
-- [`claude`](https://docs.claude.com/en/docs/claude-code) (logged in)
+- [`claude`](https://code.claude.com/docs#get-started) (logged in)
 - [`tmux`](https://github.com/tmux/tmux)
 - [`jq`](https://jqlang.github.io/jq/)
 
@@ -29,9 +29,8 @@ ccp.sh "..."  →  interactive TUI  →  subscription pool ✅
 brew install mthli/tap/ccp
 ```
 
-This pulls in `tmux` and `jq` automatically and puts a `ccp` command on your `PATH`
-(use `ccp` wherever the examples below say `./ccp.sh`).
-You still need [`claude`](https://docs.claude.com/en/docs/claude-code) installed separately and logged in.
+This pulls in `tmux` and `jq` automatically and puts a `ccp` command on your `PATH` (use `ccp` wherever the examples below say `./ccp.sh`).
+You still need [`claude`](https://code.claude.com/docs#get-started) installed separately and logged in.
 
 ### From source
 
@@ -98,6 +97,7 @@ Run `./ccp.sh --help` for the full list of options.
 ## How it works
 
 `ccp` is pure bash, with no build step and no dependencies beyond the three tools above.
+
 It coordinates three files:
 
 - **`ccp.sh`** - the orchestrator.
