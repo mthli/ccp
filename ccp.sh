@@ -8,15 +8,22 @@
 # Agent SDK credit pool. The clean final assistant text is printed to stdout.
 #
 # Usage:
-#   ./ccp.sh "<prompt>" [allow|deny|ask]
+#   ./ccp.sh [options] "<prompt>"
 #
 # Arguments:
 #   <prompt>              Prompt to send (required; quote multi-line prompts).
-#   allow|deny|ask        Tool-permission mode (optional, default: allow):
+#
+# Options:
+#   -p, --permission M    Tool-permission mode (default: allow):
 #                           allow  auto-approve every tool call (irreversible Bash
 #                                  footguns are still hard-denied)
 #                           deny   auto-reject every tool call
 #                           ask    defer to the TUI's normal permission prompt
+#   -e, --env KEY=VALUE   Set an env var for the launched session via
+#                         `tmux new-session -e` (repeatable); claude and every
+#                         hook/subprocess it runs inherit it. Lands regardless
+#                         of tmux server state.
+#   -h, --help            Show usage and exit.
 #
 # Environment overrides:
 #   CCP_READY_TIMEOUT     Seconds to wait for the input box   (default: 60)
@@ -28,54 +35,119 @@
 #   file is used); the tmux session and temp dir are cleaned up on any exit.
 #
 # Example:
-#   ./ccp.sh "summarize README.md" allow
+#   ./ccp.sh -p deny -e KEY=VALUE "summarize README.md"
 #
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ccp.sh "<prompt>" [allow|deny|ask]
+Usage: ccp.sh [options] "<prompt>"
 
-  <prompt>          Prompt to send (required; quote multi-line prompts).
-  allow|deny|ask    Tool-permission mode (default: allow).
+Arguments:
+  <prompt>                 Prompt to send (required; quote multi-line prompts).
+
+Options:
+  -p, --permission <mode>  Tool-permission mode: allow (default) | deny | ask.
+  -e, --env KEY=VALUE      Set an env var for the launched session, injected via
+                           `tmux new-session -e` (repeatable). claude and every
+                           hook/subprocess it runs inherit it.
+  -h, --help               Show this help and exit.
 
 Example:
-  ./ccp.sh "summarize README.md" allow
+  ccp.sh -p deny -e KEY=VALUE "summarize README.md"
 EOF
 }
 
-# -h/--help prints usage on stdout and exits cleanly.
-case "${1:-}" in
--h | --help)
-  usage
-  exit 0
-  ;;
-esac
-
-# Missing prompt or unknown mode: explain on stderr, exit 2 (no bash internals).
-if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
+# Print a message + usage on stderr and exit 2 (usage error).
+die() {
   {
-    echo "ccp.sh: missing required <prompt> argument"
+    echo "ccp.sh: $1"
     echo
     usage
   } >&2
   exit 2
-fi
+}
 
-PROMPT="$1"
-AUTO="${2:-allow}" # tool-permission mode: allow (default) | deny | ask
+# Parse args. The prompt is the sole positional; everything else is a flag, so a
+# bare value like "deny" is unambiguously the prompt, not a mode. `--` ends opts.
+PROMPT=""
+PROMPT_SET=0
+AUTO="allow" # tool-permission mode: allow (default) | deny | ask
+ENVS=()      # -e KEY=VALUE entries, injected via `tmux new-session -e`
+
+set_prompt() {
+  [ "$PROMPT_SET" -eq 0 ] || die "unexpected extra argument: $1"
+  PROMPT="$1"
+  PROMPT_SET=1
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -p | --permission)
+    [ "$#" -ge 2 ] || die "$1 requires a value (allow|deny|ask)"
+    AUTO="$2"
+    shift 2
+    ;;
+  --permission=*)
+    AUTO="${1#*=}"
+    shift
+    ;;
+  -e | --env)
+    [ "$#" -ge 2 ] || die "$1 requires KEY=VALUE"
+    ENVS+=("$2")
+    shift 2
+    ;;
+  --env=*)
+    ENVS+=("${1#*=}")
+    shift
+    ;;
+  -e?*)
+    ENVS+=("${1#-e}") # glued short form: -eKEY=VALUE
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  -?*)
+    die "unknown option: $1"
+    ;;
+  *)
+    set_prompt "$1"
+    shift
+    ;;
+  esac
+done
+# Anything after `--` is positional.
+while [ "$#" -gt 0 ]; do
+  set_prompt "$1"
+  shift
+done
+
+{ [ "$PROMPT_SET" -eq 1 ] && [ -n "$PROMPT" ]; } || die "missing required <prompt> argument"
 
 case "$AUTO" in
 allow | deny | ask) ;;
-*)
-  {
-    echo "ccp.sh: invalid permission mode '$AUTO' (expected: allow, deny, or ask)"
-    echo
-    usage
-  } >&2
-  exit 2
-  ;;
+*) die "invalid permission mode '$AUTO' (expected: allow, deny, or ask)" ;;
 esac
+
+# Validate each -e entry as NAME=VALUE with a sane variable name, since it is
+# passed straight to `tmux new-session -e`.
+if [ "${#ENVS[@]}" -gt 0 ]; then
+  for kv in "${ENVS[@]}"; do
+    case "$kv" in
+    [A-Za-z_]*=*) ;;
+    *) die "invalid -e value '$kv' (expected NAME=VALUE)" ;;
+    esac
+    case "${kv%%=*}" in
+    *[!A-Za-z0-9_]*) die "invalid -e variable name '${kv%%=*}' (use letters, digits, underscore)" ;;
+    esac
+  done
+fi
 
 # Preflight: every hard dependency must be on PATH. Checked up front so a missing
 # tool fails with one clear line instead of failing deep in the run: tmux would
@@ -100,7 +172,7 @@ DONE="$RUNDIR/done"
 SESSION="cc-$$"
 
 # Tunables (override via env if the TUI wording ever changes).
-CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}" # seconds to wait for the input box
+CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"  # seconds to wait for the input box
 CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-0}" # seconds to wait for the answer; 0 = forever
 
 cleanup() {
@@ -133,13 +205,18 @@ cat >"$SETTINGS" <<JSON
 }
 JSON
 
-# 2) Launch interactive claude in a detached tmux session. The session inherits
-#    this script's environment, so guard vars you export carry through — e.g. to
-#    silence a global Stop hook that re-enters `claude -p` (which would bill the
-#    Agent SDK pool), export its guard var in your shell profile before running.
-#    Caveat: that inheritance only lands when no tmux server is already running;
-#    a pre-existing server hands new sessions its own (stale) env, dropping it.
+# 2) Launch interactive claude in a detached tmux session. Each -e KEY=VALUE is
+#    injected via `tmux new-session -e`, which writes straight into the new
+#    session's environment (claude and every hook/subprocess it runs inherit it)
+#    — unlike ambient inheritance, it lands regardless of whether a tmux server
+#    is already running. One use: a guard var that silences a global Stop hook
+#    re-entering `claude -p`, which would otherwise bill the Agent SDK pool.
+tmux_env=()
+if [ "${#ENVS[@]}" -gt 0 ]; then
+  for kv in "${ENVS[@]}"; do tmux_env+=(-e "$kv"); done
+fi
 tmux new-session -d -s "$SESSION" -x 220 -y 50 \
+  ${tmux_env[@]+"${tmux_env[@]}"} \
   "claude --settings '$SETTINGS'"
 
 # 3) Wait for the input box. Empirically the reliable signals are the mode hint

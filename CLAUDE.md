@@ -11,12 +11,12 @@ Pure bash. No build, no package manager, no test suite. Dependencies: `tmux`, `j
 ## Commands
 
 ```bash
-./ccp.sh "<prompt>" [allow|deny|ask]   # run a prompt headlessly; final answer prints to stdout
-./ccp.sh --help                        # usage
-shfmt -w ccp.sh hooks/*.sh             # format (config lives in .editorconfig: 2-space indent, LF)
+./ccp.sh [-p allow|deny|ask] [-e KEY=VALUE]... "<prompt>"  # run headlessly; answer prints to stdout
+./ccp.sh --help                                            # usage
+shfmt -w ccp.sh hooks/*.sh                                 # format (.editorconfig: 2-space indent, LF)
 ```
 
-Permission mode (2nd arg, default `allow`): `allow` auto-approves every tool call (dangerous Bash is still hard-denied), `deny` rejects everything, `ask` defers to the TUI's normal prompt.
+The prompt is the sole positional arg; everything else is a flag (so a bare `deny` is unambiguously the prompt). Permission mode (`-p`/`--permission`, default `allow`): `allow` auto-approves every tool call (dangerous Bash is still hard-denied), `deny` rejects everything, `ask` defers to the TUI's normal prompt. `-e`/`--env KEY=VALUE` (repeatable) sets an env var on the launched session via `tmux new-session -e`.
 
 Env overrides: `CCP_READY_TIMEOUT` (default 60s, wait for input box) and `CCP_ANSWER_TIMEOUT` (default 0 = wait forever, since prompt complexity is unbounded).
 
@@ -26,7 +26,7 @@ Three files cooperate. `ccp.sh` is the orchestrator; the two hooks run *inside* 
 
 **`ccp.sh`** — the orchestrator, in numbered steps:
 1. Writes a throwaway `--settings` JSON into a `mktemp -d` rundir, wiring two hooks (`PreToolUse` → `auto-perm.sh`, `Stop` → `dump-transcript.sh`). The user's real `~/.claude/settings.json` is never touched. Hook paths/args are baked straight into the command strings — nothing is smuggled through tmux env.
-2. Launches `claude --settings ...` in a detached tmux session.
+2. Launches `claude --settings ...` in a detached tmux session, injecting any `-e KEY=VALUE` via `tmux new-session -e`.
 3. Polls `tmux capture-pane` until the input box is ready, dismissing the "trust this folder" dialog once if it appears.
 4. Sends the prompt via `load-buffer`/`paste-buffer` (newline-safe, so multi-line prompts don't submit early), then `Enter` separately.
 5. Blocks until the `Stop` hook drops a `done` sentinel file.
@@ -40,7 +40,7 @@ A single `cleanup` trap (EXIT/INT/TERM) always kills the tmux session and remove
 
 ### Things that will bite you if you don't know them
 
-- **ccp sets no hook-guard env vars — you supply them, and tmux can silently drop them.** If you run a global `Stop` hook that re-enters `claude -p` (spawns a nested Claude session per turn), it fires during headless runs and bills the Agent SDK credit pool — the exact thing ccp exists to avoid. Suppress it by exporting that hook's own guard var in your shell profile; the launched session inherits this script's env. Caveat: that inheritance only lands when **no tmux server is already running** — a pre-existing server hands new sessions its own (stale) env, silently dropping the var.
+- **Re-entrant `Stop` hooks bill the Agent SDK pool — suppress them with `-e`.** A global `Stop` hook that re-enters `claude -p` (spawns a nested Claude session per turn) fires during headless runs and bills the Agent SDK credit pool — the exact thing ccp exists to avoid. `-e KEY=VALUE` sets *any* env var on the launched session (inherited by claude and every hook/subprocess it runs), so set whatever guard var disables such a hook. It injects via `tmux new-session -e`, writing straight into the session env, so it lands regardless of tmux server state — unlike ambient inheritance, which a pre-existing tmux server silently drops (it hands new sessions its own stale env).
 - **Readiness detection is signal-based, not "shortcuts"-based.** `ccp.sh` greps for `(shift+tab to cycle)` / `? for shortcuts` / an empty `❯` prompt line, because a custom statusline can hide the shortcuts hint. If the TUI wording changes, this is what breaks — the env timeouts exist as the escape hatch.
 - **`Stop` fires before the final JSONL line flushes.** `dump-transcript.sh` re-reads up to ~6s (30 × 0.2s) until the final text block lands; reading once races to an empty result.
 - **PreToolUse output schema is `hookSpecificOutput.permissionDecision`** — the legacy `decision: approve/block` is dead for PreToolUse. A hook `allow` cannot override a settings `permissions.deny` rule.
