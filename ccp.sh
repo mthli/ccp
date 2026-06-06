@@ -77,6 +77,21 @@ allow | deny | ask) ;;
   ;;
 esac
 
+# Preflight: every hard dependency must be on PATH. Checked up front so a missing
+# tool fails with one clear line instead of failing deep in the run: tmux would
+# abort at `tmux new-session` with a raw "command not found", while jq breaks the
+# hooks (not this script) — auto-perm can't emit a decision and dump-transcript
+# silently yields an empty answer, neither of which points at the real cause.
+missing=""
+for dep in tmux jq claude; do
+  command -v "$dep" >/dev/null 2>&1 || missing="$missing $dep"
+done
+if [ -n "$missing" ]; then
+  echo "ccp.sh: missing required dependencies: $missing" >&2
+  echo "ccp.sh: install them and re-run (deps: tmux, jq, claude)." >&2
+  exit 127
+fi
+
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)/hooks"
 RUNDIR="$(mktemp -d -t cc-run.XXXXXX)"
 SETTINGS="$RUNDIR/settings.json"
