@@ -7,23 +7,8 @@
 # were `claude -p`, so usage bills against the subscription pool instead of the
 # Agent SDK credit pool. The clean final assistant text is printed to stdout.
 #
-# Usage:
-#   ./ccp.sh [options] "<prompt>"
-#
-# Arguments:
-#   <prompt>              Prompt to send (required; quote multi-line prompts).
-#
-# Options:
-#   -p, --permission M    Tool-permission mode (default: allow):
-#                           allow  auto-approve every tool call (irreversible Bash
-#                                  footguns are still hard-denied)
-#                           deny   auto-reject every tool call
-#                           ask    defer to the TUI's normal permission prompt
-#   -e, --env KEY=VALUE   Set an env var for the launched session via
-#                         `tmux new-session -e` (repeatable); claude and every
-#                         hook/subprocess it runs inherit it. Lands regardless
-#                         of tmux server state.
-#   -h, --help            Show usage and exit.
+# Run `./ccp.sh --help` for the CLI surface (args, flags, example) — that is the
+# single source of truth; see usage() below.
 #
 # Environment overrides:
 #   CCP_READY_TIMEOUT     Seconds to wait for the input box   (default: 60)
@@ -33,9 +18,6 @@
 # Safety:
 #   Your real ~/.claude/settings.json is never touched (a throwaway --settings
 #   file is used); the tmux session and temp dir are cleaned up on any exit.
-#
-# Example:
-#   ./ccp.sh -p deny -e KEY=VALUE "summarize README.md"
 #
 set -euo pipefail
 
