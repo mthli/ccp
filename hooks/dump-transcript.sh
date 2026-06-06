@@ -22,7 +22,7 @@ INPUT="$(cat || true)"
 TRANSCRIPT="$(jq -r '.transcript_path // ""' <<<"$INPUT" 2>/dev/null || echo "")"
 
 extract() {
-	jq -s -r '
+  jq -s -r '
     ([ .[] | .type ] | map(. == "user") | rindex(true)) as $u
     | (if $u == null then 0 else $u + 1 end) as $start
     | [ .[$start:][]
@@ -39,11 +39,11 @@ extract() {
 # to an empty result. Re-read until the final block lands (bounded ~6s).
 LAST=""
 if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]]; then
-	for _ in $(seq 1 30); do
-		LAST="$(extract "$TRANSCRIPT")"
-		[[ -n "$LAST" ]] && break
-		sleep 0.2
-	done
+  for _ in $(seq 1 30); do
+    LAST="$(extract "$TRANSCRIPT")"
+    [[ -n "$LAST" ]] && break
+    sleep 0.2
+  done
 fi
 
 printf '%s\n' "$LAST" >"$OUT"
