@@ -212,7 +212,16 @@ if [ -n "$missing" ]; then
   exit 127
 fi
 
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)/hooks"
+# Locate hooks/ beside this script. Resolve symlinks first: when installed via a
+# Homebrew-style `bin/ccp -> libexec/ccp.sh` symlink, a bare `dirname "$0"` would
+# point at bin/ (no hooks there) — follow the link chain to the real file instead.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+HOOK_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)/hooks"
 
 # Preflight the hooks too: they are as load-bearing as the deps above (auto-permission
 # emits the permission decision, dump-transcript drives the done sentinel), and a
