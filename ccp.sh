@@ -133,13 +133,14 @@ cat >"$SETTINGS" <<JSON
 }
 JSON
 
-# 2) Launch interactive claude in a detached tmux session.
-#    CLAUDE_VOCAB_EXTRACTING=1 trips the statusline-vocab Stop hook's re-entry
-#    guard so it does NOT spawn a `claude -p` Haiku call per turn — that nested
-#    -p would bill the Agent SDK credit pool, the exact thing this scheme avoids.
-#    Drop the prefix if you want vocab to keep updating during headless runs.
+# 2) Launch interactive claude in a detached tmux session. The session inherits
+#    this script's environment, so guard vars you export carry through — e.g. to
+#    silence a global Stop hook that re-enters `claude -p` (which would bill the
+#    Agent SDK pool), export its guard var in your shell profile before running.
+#    Caveat: that inheritance only lands when no tmux server is already running;
+#    a pre-existing server hands new sessions its own (stale) env, dropping it.
 tmux new-session -d -s "$SESSION" -x 220 -y 50 \
-  "CLAUDE_VOCAB_EXTRACTING=1 claude --settings '$SETTINGS'"
+  "claude --settings '$SETTINGS'"
 
 # 3) Wait for the input box. Empirically the reliable signals are the mode hint
 #    "(shift+tab to cycle)" / "? for shortcuts" and the empty prompt line; a
