@@ -10,7 +10,7 @@
 set -euo pipefail
 
 PROMPT="${1:?usage: ccp.sh \"prompt\" [allow|deny|ask]}"
-AUTO="${2:-allow}"                       # default: auto-approve every tool
+AUTO="${2:-allow}" # default: auto-approve every tool
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)/hooks"
 RUNDIR="$(mktemp -d -t cc-run.XXXXXX)"
@@ -20,18 +20,18 @@ DONE="$RUNDIR/done"
 SESSION="cc-$$"
 
 # Tunables (override via env if the TUI wording ever changes).
-READY_TIMEOUT="${READY_TIMEOUT:-60}"     # seconds to wait for the input box
-ANSWER_TIMEOUT="${ANSWER_TIMEOUT:-600}"  # seconds to wait for the answer
+READY_TIMEOUT="${READY_TIMEOUT:-60}"    # seconds to wait for the input box
+ANSWER_TIMEOUT="${ANSWER_TIMEOUT:-600}" # seconds to wait for the answer
 
 cleanup() {
-  tmux kill-session -t "$SESSION" 2>/dev/null || true
-  rm -rf "$RUNDIR"
+	tmux kill-session -t "$SESSION" 2>/dev/null || true
+	rm -rf "$RUNDIR"
 }
 trap cleanup EXIT INT TERM
 
 # 1) Temp settings: PreToolUse auto-permission + Stop transcript dump.
 #    Paths baked straight into the command lines (no env smuggling through tmux).
-cat > "$SETTINGS" <<JSON
+cat >"$SETTINGS" <<JSON
 {
   "hooks": {
     "PreToolUse": [
@@ -54,7 +54,7 @@ JSON
 #    -p would bill the Agent SDK credit pool, the exact thing this scheme avoids.
 #    Drop the prefix if you want vocab to keep updating during headless runs.
 tmux new-session -d -s "$SESSION" -x 220 -y 50 \
-  "CLAUDE_VOCAB_EXTRACTING=1 claude --settings '$SETTINGS'"
+	"CLAUDE_VOCAB_EXTRACTING=1 claude --settings '$SETTINGS'"
 
 # 3) Wait for the input box. Empirically the reliable signals are the mode hint
 #    "(shift+tab to cycle)" / "? for shortcuts" and the empty prompt line; a
@@ -64,36 +64,36 @@ pane() { tmux capture-pane -p -t "$SESSION" 2>/dev/null || true; }
 
 ready=0
 trust_sent=0
-deadline=$(( $(date +%s) + READY_TIMEOUT ))
+deadline=$(($(date +%s) + READY_TIMEOUT))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "ERROR: claude session died during startup" >&2
-    pane >&2
-    exit 1
-  fi
-  P="$(pane)"
+	if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+		echo "ERROR: claude session died during startup" >&2
+		pane >&2
+		exit 1
+	fi
+	P="$(pane)"
 
-  # Dismiss the "trust this folder" safety prompt once (option 1 is preselected).
-  if [ "$trust_sent" -eq 0 ] && grep -qiE 'trust this folder|Yes, I trust' <<<"$P"; then
-    tmux send-keys -t "$SESSION" Enter
-    trust_sent=1
-    sleep 0.3
-    continue
-  fi
+	# Dismiss the "trust this folder" safety prompt once (option 1 is preselected).
+	if [ "$trust_sent" -eq 0 ] && grep -qiE 'trust this folder|Yes, I trust' <<<"$P"; then
+		tmux send-keys -t "$SESSION" Enter
+		trust_sent=1
+		sleep 0.3
+		continue
+	fi
 
-  # Input box ready.
-  if grep -qE '\(shift\+tab to cycle\)|\? for shortcuts' <<<"$P" \
-     || grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$P"; then
-    ready=1
-    break
-  fi
-  sleep 0.2
+	# Input box ready.
+	if grep -qE '\(shift\+tab to cycle\)|\? for shortcuts' <<<"$P" ||
+		grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$P"; then
+		ready=1
+		break
+	fi
+	sleep 0.2
 done
 
 if [ "$ready" -ne 1 ]; then
-  echo "ERROR: input box not ready within ${READY_TIMEOUT}s" >&2
-  pane >&2
-  exit 1
+	echo "ERROR: input box not ready within ${READY_TIMEOUT}s" >&2
+	pane >&2
+	exit 1
 fi
 
 # 4) Feed the prompt. load-buffer/paste-buffer is newline-safe (multi-line
@@ -104,22 +104,22 @@ sleep 0.2
 tmux send-keys -t "$SESSION" Enter
 
 # 5) Wait for the Stop hook to drop the done sentinel.
-adeadline=$(( $(date +%s) + ANSWER_TIMEOUT ))
+adeadline=$(($(date +%s) + ANSWER_TIMEOUT))
 while [ "$(date +%s)" -lt "$adeadline" ]; do
-  [ -f "$DONE" ] && break
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "ERROR: claude session died before answering" >&2
-    exit 1
-  fi
-  sleep 0.2
+	[ -f "$DONE" ] && break
+	if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+		echo "ERROR: claude session died before answering" >&2
+		exit 1
+	fi
+	sleep 0.2
 done
 
 # 6) Emit result.
 if [ -f "$DONE" ]; then
-  cat "$OUT"
+	cat "$OUT"
 else
-  echo "ERROR: timed out after ${ANSWER_TIMEOUT}s waiting for the answer" >&2
-  exit 1
+	echo "ERROR: timed out after ${ANSWER_TIMEOUT}s waiting for the answer" >&2
+	exit 1
 fi
 # 7) cleanup (kill tmux + rm RUNDIR) runs automatically via the trap set above,
 #    covering normal exit, every `exit 1` path, and Ctrl-C / kill.
