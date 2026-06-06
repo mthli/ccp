@@ -74,6 +74,16 @@ cd ccp
 ./ccp.sh -e FOO=bar -e DEBUG=1 "print the FOO env var"
 ```
 
+### tmux 세션 이름 지정
+
+기본적으로 각 실행은 고유한 `cc-<pid>` tmux 세션을 사용합니다. `-s`를 전달하면 세션 이름을 직접 지정할 수 있어, attach(`tmux attach -t <name>`)하거나 여러 개를 나란히 실행할 때 편리합니다.
+
+```bash
+./ccp.sh -s review "review the diff"
+```
+
+> 세션 이름에는 `.`이나 `:`를 포함할 수 없으며, 기존 세션과 같은 이름일 수도 없습니다(ccp는 자신이 만들지 않은 세션을 재사용하거나 종료하지 않습니다).
+
 ### claude에 옵션 전달하기
 
 `--` 뒤의 모든 것은 그대로 하위의 `claude`로 전달되므로, claude 자체의 플래그가 그대로 동작합니다.

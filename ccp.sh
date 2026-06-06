@@ -31,6 +31,8 @@ Arguments:
 
 ccp options (before `--`):
   -p, --permission <mode>   Tool-permission mode: allow (default) | deny | ask.
+  -s, --session <name>      tmux session name for the run (default: cc-<pid>).
+                            Must not contain '.' or ':'; must not already exist.
   -e, --env KEY=VALUE       Set an env var for the launched session, injected via
                             `tmux new-session -e` (repeatable). claude and every
                             hook/subprocess it runs inherit it.
@@ -78,9 +80,11 @@ shq() {
 # to `claude` (the scan further down peels off the two flags ccp handles itself).
 PROMPT=""
 PROMPT_SET=0
-AUTO="allow" # tool-permission mode: allow (default) | deny | ask
-ENVS=()      # -e KEY=VALUE entries, injected via `tmux new-session -e`
-PASSTHRU=()  # raw tokens after `--`, headed for claude
+AUTO="allow"    # tool-permission mode: allow (default) | deny | ask
+SESSION_NAME="" # -s/--session: tmux session name (unset → cc-<pid> default)
+SESSION_SET=0   # whether -s/--session was given (to reject an explicit empty)
+ENVS=()         # -e KEY=VALUE entries, injected via `tmux new-session -e`
+PASSTHRU=()     # raw tokens after `--`, headed for claude
 
 set_prompt() {
   [ "$PROMPT_SET" -eq 0 ] || die "unexpected extra argument: $1 (claude options go after --)"
@@ -116,6 +120,17 @@ while [ "$#" -gt 0 ]; do
     ENVS+=("${1#-e}") # glued short form: -eKEY=VALUE
     shift
     ;;
+  -s | --session)
+    [ "$#" -ge 2 ] || die "$1 requires a session name"
+    SESSION_NAME="$2"
+    SESSION_SET=1
+    shift 2
+    ;;
+  --session=*)
+    SESSION_NAME="${1#*=}"
+    SESSION_SET=1
+    shift
+    ;;
   --)
     shift
     # Everything after `--` is claude passthrough; collect it untouched.
@@ -126,7 +141,7 @@ while [ "$#" -gt 0 ]; do
     break
     ;;
   -?*)
-    die "unknown ccp option: $1 (ccp flags: -p, -e, -h; claude options go after --)"
+    die "unknown ccp option: $1 (ccp flags: -p, -s, -e, -h; claude options go after --)"
     ;;
   *)
     set_prompt "$1"
@@ -141,6 +156,16 @@ case "$AUTO" in
 allow | deny | ask) ;;
 *) die "invalid permission mode '$AUTO' (expected: allow, deny, or ask)" ;;
 esac
+
+# Validate the -s session name when given: tmux rejects an empty name and any
+# name containing '.' or ':' (its target-spec separators). When unset, the launch
+# falls back to the unique cc-<pid> default below.
+if [ "$SESSION_SET" -eq 1 ]; then
+  [ -n "$SESSION_NAME" ] || die "-s/--session requires a non-empty session name"
+  case "$SESSION_NAME" in
+  *[.:]*) die "invalid -s session name '$SESSION_NAME' (must not contain '.' or ':')" ;;
+  esac
+fi
 
 # Validate each -e entry as NAME=VALUE with a sane variable name, since it is
 # passed straight to `tmux new-session -e`.
@@ -239,7 +264,7 @@ RUNDIR="$(mktemp -d -t cc-run.XXXXXX)"
 SETTINGS="$RUNDIR/settings.json"
 OUT="$RUNDIR/output.txt"
 DONE="$RUNDIR/done"
-SESSION="cc-$$"
+SESSION="${SESSION_NAME:-cc-$$}"
 
 # Tunables (override via env if the TUI wording ever changes).
 CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"  # seconds to wait for the input box
@@ -256,8 +281,15 @@ if [ "$AUTO" = "ask" ] && ! [ "$CCP_ANSWER_TIMEOUT" -gt 0 ] 2>/dev/null; then
   echo "ccp.sh: or it waits forever (set CCP_ANSWER_TIMEOUT to bound the wait)." >&2
 fi
 
+# Only kill the tmux session if WE started it (flipped on right after a successful
+# `tmux new-session`). A user-supplied -s name can collide with a pre-existing
+# session; without this guard, dying on that collision would tear down a session
+# ccp never created.
+SESSION_STARTED=0
 cleanup() {
-  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  if [ "$SESSION_STARTED" -eq 1 ]; then
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+  fi
   rm -rf "$RUNDIR"
 }
 # EXIT always cleans up. INT/TERM exit explicitly so Ctrl-C (or `kill`) unwinds
@@ -332,9 +364,17 @@ if [ "${#CLAUDE_ARGS[@]}" -gt 0 ]; then
     claude_cmd="$claude_cmd $(shq "$a")"
   done
 fi
+# A user-supplied -s name can collide with an existing session. Bail before
+# launching — and before SESSION_STARTED flips on — so cleanup never kills a
+# session ccp didn't create. (The default cc-<pid> name is effectively unique.)
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "ccp.sh: tmux session '$SESSION' already exists — pick another -s name or kill it first." >&2
+  exit 1
+fi
 tmux new-session -d -s "$SESSION" -x 220 -y 50 \
   ${tmux_env[@]+"${tmux_env[@]}"} \
   "$claude_cmd"
+SESSION_STARTED=1
 
 # 3) Wait for the input box. Empirically the reliable signals are the mode hint
 #    "(shift+tab to cycle)" / "? for shortcuts" and the empty prompt line; a

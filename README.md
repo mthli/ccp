@@ -76,6 +76,16 @@ Choose how tool calls are handled with `-p`:
 ./ccp.sh -e FOO=bar -e DEBUG=1 "print the FOO env var"
 ```
 
+### Naming the tmux session
+
+By default the run uses a unique `cc-<pid>` tmux session. Pass `-s` to name it yourself, handy for attaching (`tmux attach -t <name>`) or running side by side:
+
+```bash
+./ccp.sh -s review "review the diff"
+```
+
+> The name must not contain `.` or `:`, and must not match an existing session (ccp never reuses or kills a session it didn't create).
+
 ### Passing options to claude
 
 Everything after `--` is forwarded verbatim to the underlying `claude`, so its own flags just work:

@@ -74,6 +74,16 @@ prompt 输入进去，最终答案从 stdout 输出：
 ./ccp.sh -e FOO=bar -e DEBUG=1 "print the FOO env var"
 ```
 
+### 命名 tmux 会话
+
+默认情况下，每次运行都会使用一个唯一的 `cc-<pid>` tmux 会话。传入 `-s` 可以自己指定会话名，便于 attach（`tmux attach -t <name>`）或并行运行多个会话：
+
+```bash
+./ccp.sh -s review "review the diff"
+```
+
+> 会话名不能包含 `.` 或 `:`，也不能与已存在的会话同名（ccp 绝不会复用或终止不是它自己创建的会话）。
+
 ### 向 claude 传递选项
 
 `--` 之后的一切都会原样转发给底层的 `claude`，因此它自己的 flag 都能直接生效：

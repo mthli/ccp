@@ -74,6 +74,16 @@ prompt 輸入進去，最終答案從 stdout 輸出：
 ./ccp.sh -e FOO=bar -e DEBUG=1 "print the FOO env var"
 ```
 
+### 命名 tmux 工作階段
+
+預設情況下，每次執行都會使用一個唯一的 `cc-<pid>` tmux 工作階段。傳入 `-s` 可以自行指定工作階段名稱，方便 attach（`tmux attach -t <name>`）或同時執行多個工作階段：
+
+```bash
+./ccp.sh -s review "review the diff"
+```
+
+> 工作階段名稱不能包含 `.` 或 `:`，也不能與既有的工作階段同名（ccp 絕不會重用或終止不是它自己建立的工作階段）。
+
 ### 向 claude 傳遞選項
 
 `--` 之後的一切都會原樣轉發給底層的 `claude`，因此它自己的 flag 都能直接生效：
