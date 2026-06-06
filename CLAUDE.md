@@ -31,7 +31,7 @@ Env overrides: `CCP_READY_TIMEOUT` (default 60s, wait for input box) and `CCP_AN
 Three files cooperate. `ccp.sh` is the orchestrator; the two hooks run *inside* the spawned Claude process and communicate back via files.
 
 **`ccp.sh`** — the orchestrator, in numbered steps:
-1. Writes a throwaway `--settings` JSON into a `mktemp -d` rundir, wiring two hooks (`PreToolUse` → `auto-perm.sh`, `Stop` → `dump-transcript.sh`). The user's real `~/.claude/settings.json` is never touched. Hook paths/args are baked straight into the command strings — nothing is smuggled through tmux env. Any passthrough `--settings` is deep-merged underneath this (via `jq`), with ccp's two hooks overlaid last so they win.
+1. Writes a throwaway `--settings` JSON into a `mktemp -d` rundir, wiring two hooks (`PreToolUse` → `auto-permission.sh`, `Stop` → `dump-transcript.sh`). The user's real `~/.claude/settings.json` is never touched. Hook paths/args are baked straight into the command strings — nothing is smuggled through tmux env. Any passthrough `--settings` is deep-merged underneath this (via `jq`), with ccp's two hooks overlaid last so they win.
 2. Launches `claude --settings ...` (plus any passthrough args after `--`, each `shq`-quoted so spaces/specials survive the shell tmux runs the command through) in a detached tmux session, injecting any `-e KEY=VALUE` via `tmux new-session -e`. claude launches with **no** positional prompt — interactive — so the prompt is only ever pasted in step 4, never passed as a CLI arg.
 3. Polls `tmux capture-pane` until the input box is ready, dismissing the "trust this folder" dialog once if it appears.
 4. Sends the prompt via `load-buffer`/`paste-buffer` (newline-safe, so multi-line prompts don't submit early), then `Enter` separately.
@@ -40,7 +40,7 @@ Three files cooperate. `ccp.sh` is the orchestrator; the two hooks run *inside* 
 
 A single `cleanup` trap (EXIT/INT/TERM) always kills the tmux session and removes the rundir.
 
-**`hooks/auto-perm.sh`** (PreToolUse) — emits a permission decision so the TUI never shows a y/n box, removing any need to scrape the pane for prompts. Even under `allow` it hard-denies irreversible Bash footguns (`rm -rf`, `mkfs`, `dd if=`, fork bombs, writes to `/dev/sd*`).
+**`hooks/auto-permission.sh`** (PreToolUse) — emits a permission decision so the TUI never shows a y/n box, removing any need to scrape the pane for prompts. Even under `allow` it hard-denies irreversible Bash footguns (`rm -rf`, `mkfs`, `dd if=`, fork bombs, writes to `/dev/sd*`).
 
 **`hooks/dump-transcript.sh`** (Stop) — reads the transcript JSONL and extracts "the final answer" = every `assistant` text block after the *last* `user` line (last tool_result, or the prompt). This survives multi-block answers and answers that resume after a tool call; sidechain/subagent lines are excluded. Writes the text to the out-file, then touches the done-file **last** so the orchestrator never reads a half-written answer.
 

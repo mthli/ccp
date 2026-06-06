@@ -3,7 +3,7 @@
 # TUI never pops a y/n box (no capture-pane scraping needed).
 #
 # Usage (baked into --settings command line):
-#   auto-perm.sh <allow|deny|ask>
+#   auto-permission.sh <allow|deny|ask>
 #
 # With a bare policy arg it applies that decision to every tool. It also reads
 # stdin so the pipe never blocks, and lets a few obviously-dangerous Bash
@@ -37,6 +37,6 @@ jq -nc --arg d "$DEC" '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: $d,
-    permissionDecisionReason: ("auto-perm: " + $d)
+    permissionDecisionReason: ("auto-permission: " + $d)
   }
 }'

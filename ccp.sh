@@ -200,7 +200,7 @@ done
 # Preflight: every hard dependency must be on PATH. Checked up front so a missing
 # tool fails with one clear line instead of failing deep in the run: tmux would
 # abort at `tmux new-session` with a raw "command not found", while jq breaks the
-# hooks (not this script) — auto-perm can't emit a decision and dump-transcript
+# hooks (not this script) — auto-permission can't emit a decision and dump-transcript
 # silently yields an empty answer, neither of which points at the real cause.
 missing=""
 for dep in tmux jq claude; do
@@ -214,11 +214,11 @@ fi
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)/hooks"
 
-# Preflight the hooks too: they are as load-bearing as the deps above (auto-perm
+# Preflight the hooks too: they are as load-bearing as the deps above (auto-permission
 # emits the permission decision, dump-transcript drives the done sentinel), and a
 # missing or non-executable one fails silently mid-run — the TUI would block on a
 # permission box, or the done sentinel would never appear, hanging us forever.
-for hook in auto-perm.sh dump-transcript.sh; do
+for hook in auto-permission.sh dump-transcript.sh; do
   if [ ! -x "$HOOK_DIR/$hook" ]; then
     echo "ccp.sh: required hook not found or not executable: $HOOK_DIR/$hook" >&2
     echo "ccp.sh: ensure hooks/ sits beside ccp.sh and is executable (chmod +x)." >&2
@@ -263,12 +263,12 @@ trap 'exit 143' TERM
 #    each is shell-quoted via shq so a path with spaces or quotes survives when
 #    claude runs it.
 #    Any user `--settings` (file or JSON, repeatable) is deep-merged underneath,
-#    but ccp's PreToolUse/Stop hooks always win: they ARE the mechanism (auto-perm
+#    but ccp's PreToolUse/Stop hooks always win: they ARE the mechanism (auto-permission
 #    suppresses the y/n box, dump-transcript drives the done sentinel), so a user
 #    hook for either of those two events is dropped while every other setting —
 #    including other hook events like PostToolUse — is kept.
 CCP_HOOKS="$(jq -n \
-  --arg auto "$(shq "$HOOK_DIR/auto-perm.sh") $AUTO" \
+  --arg auto "$(shq "$HOOK_DIR/auto-permission.sh") $AUTO" \
   --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE")" \
   '{
     PreToolUse: [{matcher: "*", hooks: [{type: "command", command: $auto}]}],
