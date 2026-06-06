@@ -40,7 +40,7 @@ A single `cleanup` trap (EXIT/INT/TERM) always kills the tmux session and remove
 
 ### Things that will bite you if you don't know them
 
-- **`CLAUDE_VOCAB_EXTRACTING=1` is set when launching** (`ccp.sh:127`). This trips the `statusline-vocab` Stop hook's re-entry guard so it does *not* spawn a nested `claude -p` Haiku call per turn — that nested `-p` would bill the Agent SDK credit pool, the exact thing this whole scheme exists to avoid. Drop it only if you want vocab to keep updating during headless runs and accept that cost.
+- **`CLAUDE_VOCAB_EXTRACTING=1` is set when launching** (`ccp.sh:142`). This trips the `statusline-vocab` Stop hook's re-entry guard so it does *not* spawn a nested `claude -p` Haiku call per turn — that nested `-p` would bill the Agent SDK credit pool, the exact thing this whole scheme exists to avoid. Drop it only if you want vocab to keep updating during headless runs and accept that cost.
 - **Readiness detection is signal-based, not "shortcuts"-based.** `ccp.sh` greps for `(shift+tab to cycle)` / `? for shortcuts` / an empty `❯` prompt line, because a custom statusline can hide the shortcuts hint. If the TUI wording changes, this is what breaks — the env timeouts exist as the escape hatch.
 - **`Stop` fires before the final JSONL line flushes.** `dump-transcript.sh` re-reads up to ~6s (30 × 0.2s) until the final text block lands; reading once races to an empty result.
 - **PreToolUse output schema is `hookSpecificOutput.permissionDecision`** — the legacy `decision: approve/block` is dead for PreToolUse. A hook `allow` cannot override a settings `permissions.deny` rule.
