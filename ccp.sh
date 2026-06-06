@@ -20,7 +20,8 @@
 #
 # Environment overrides:
 #   CCP_READY_TIMEOUT     Seconds to wait for the input box   (default: 60)
-#   CCP_ANSWER_TIMEOUT    Seconds to wait for the answer      (default: 600)
+#   CCP_ANSWER_TIMEOUT    Seconds to wait for the answer;
+#                         0 = wait forever                    (default: 0)
 #
 # Safety:
 #   Your real ~/.claude/settings.json is never touched (a throwaway --settings
@@ -84,14 +85,19 @@ DONE="$RUNDIR/done"
 SESSION="cc-$$"
 
 # Tunables (override via env if the TUI wording ever changes).
-CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"    # seconds to wait for the input box
-CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-600}" # seconds to wait for the answer
+CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}" # seconds to wait for the input box
+CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-0}" # seconds to wait for the answer; 0 = forever
 
 cleanup() {
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   rm -rf "$RUNDIR"
 }
-trap cleanup EXIT INT TERM
+# EXIT always cleans up. INT/TERM exit explicitly so Ctrl-C (or `kill`) unwinds
+# through the EXIT trap once — removing the temp dir and tmux session — instead
+# of running cleanup mid-loop and then continuing to poll.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 1) Temp settings: PreToolUse auto-permission + Stop transcript dump.
 #    Paths baked straight into the command lines (no env smuggling through tmux).
@@ -168,8 +174,16 @@ sleep 0.2
 tmux send-keys -t "$SESSION" Enter
 
 # 5) Wait for the Stop hook to drop the done sentinel.
-adeadline=$(($(date +%s) + CCP_ANSWER_TIMEOUT))
-while [ "$(date +%s)" -lt "$adeadline" ]; do
+#    CCP_ANSWER_TIMEOUT=0 waits forever — input complexity is unbounded, so there
+#    is no sane fixed cap; the answer is whenever the model stops. Ctrl-C / kill
+#    still tear everything down via the trap above. A session crash also breaks
+#    the loop, so "forever" only ever means "until the model finishes or dies".
+if [ "${CCP_ANSWER_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
+  adeadline=$(($(date +%s) + CCP_ANSWER_TIMEOUT))
+else
+  adeadline=0 # 0 = no deadline
+fi
+while [ "$adeadline" -eq 0 ] || [ "$(date +%s)" -lt "$adeadline" ]; do
   [ -f "$DONE" ] && break
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "ERROR: claude session died before answering" >&2
