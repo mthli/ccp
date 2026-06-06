@@ -4,7 +4,7 @@ Headless Claude Code automation without the headless mode 👀
 
 ## What it is
 
-`ccp` runs Claude Code like `claude -p` — feed it a prompt, get the final answer on stdout — but **bills your subscription instead of the Agent SDK credit pool**.
+`ccp` runs Claude Code like `claude -p` (feed it a prompt, get the final answer on stdout), but **bills your subscription instead of the Agent SDK credit pool**.
 
 It does this by driving a real *interactive* Claude Code TUI inside a detached [tmux](https://github.com/tmux/tmux) session:
 it launches Claude, types in your prompt, auto-answers the permission prompts, and scrapes the final reply.
@@ -81,15 +81,15 @@ Run `./ccp.sh --help` for the full list of options.
 
 ## How it works
 
-`ccp` is pure bash — no build step, no dependencies beyond the three tools above.
+`ccp` is pure bash, with no build step and no dependencies beyond the three tools above.
 It coordinates three files:
 
-- **`ccp.sh`** — the orchestrator.
+- **`ccp.sh`**: the orchestrator.
   Writes a throwaway settings file (your real `~/.claude/settings.json` is never touched),
   launches `claude` in a detached tmux session, pastes the prompt, waits for completion, and prints the answer.
-- **`hooks/auto-permission.sh`** — a `PreToolUse` hook that answers each permission prompt,
+- **`hooks/auto-permission.sh`**: a `PreToolUse` hook that answers each permission prompt,
   so the TUI never blocks on a y/n box.
-- **`hooks/dump-transcript.sh`** — a `Stop` hook that pulls the final assistant reply out of the transcript
+- **`hooks/dump-transcript.sh`**: a `Stop` hook that pulls the final assistant reply out of the transcript
   and signals the orchestrator that it's done.
 
 The tmux session and temp files are cleaned up on every exit.
