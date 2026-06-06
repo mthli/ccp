@@ -13,8 +13,11 @@ Pure bash. No build, no package manager, no test suite. Dependencies: `tmux`, `j
 ```bash
 ./ccp.sh [-p allow|deny|ask] [-e KEY=VALUE]... "<prompt>"  # run headlessly; answer prints to stdout
 ./ccp.sh --help                                            # usage
+./ccp.sh "say hi"                                          # end-to-end smoke test (see below)
 shfmt -w ccp.sh hooks/*.sh                                 # format (.editorconfig: 2-space indent, LF)
 ```
+
+There is no test suite. Verify a change by running the script end-to-end (e.g. `./ccp.sh "say hi"`) — that is the only real test: it exercises the whole launch → readiness → prompt-feed → hook → extract pipeline, and bills a live subscription session (so you must be logged into `claude`).
 
 The prompt is the sole positional arg; everything else is a flag (so a bare `deny` is unambiguously the prompt). Permission mode (`-p`/`--permission`, default `allow`): `allow` auto-approves every tool call (dangerous Bash is still hard-denied), `deny` rejects everything, `ask` defers to the TUI's normal prompt. `-e`/`--env KEY=VALUE` (repeatable) sets an env var on the launched session via `tmux new-session -e`.
 
