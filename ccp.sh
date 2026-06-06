@@ -26,26 +26,26 @@ usage() {
 Usage: ccp.sh [ccp-options] "<prompt>" [-- <claude-options>...]
 
 Arguments:
-  <prompt>                 Prompt to send (required; quote multi-line prompts).
-                           Must appear before `--`.
+  <prompt>                  Prompt to send (required; quote multi-line prompts).
+                            Must appear before `--`.
 
 ccp options (before `--`):
-  -p, --permission <mode>  Tool-permission mode: allow (default) | deny | ask.
-  -e, --env KEY=VALUE      Set an env var for the launched session, injected via
-                           `tmux new-session -e` (repeatable). claude and every
-                           hook/subprocess it runs inherit it.
-  -h, --help               Show this help and exit.
+  -p, --permission <mode>   Tool-permission mode: allow (default) | deny | ask.
+  -e, --env KEY=VALUE       Set an env var for the launched session, injected via
+                            `tmux new-session -e` (repeatable). claude and every
+                            hook/subprocess it runs inherit it.
+  -h, --help                Show this help and exit.
 
 claude passthrough (after `--`):
   Everything after `--` is forwarded verbatim to the underlying `claude`, so you
   can use claude's own options (--model, --add-dir, --mcp-config, ...). Two are
   handled by ccp instead of being passed through:
-    --settings <file|json>   Deep-merged into ccp's generated settings
-                             (repeatable); ccp's own PreToolUse/Stop hooks win.
-    -p, --print              Ignored with a warning — claude's headless mode is
-                             unsupported (ccp drives an interactive session and
-                             prints the final answer itself). Use ccp's own
-                             -p/--permission for the tool-permission mode.
+    --settings <file|json>  Deep-merged into ccp's generated settings
+                            (repeatable); ccp's own PreToolUse/Stop hooks win.
+    -p, --print             Ignored with a warning — claude's headless mode is
+                            unsupported (ccp drives an interactive session and
+                            prints the final answer itself). Use ccp's own
+                            -p/--permission for the tool-permission mode.
 
 Examples:
   ccp.sh "summarize README.md"
