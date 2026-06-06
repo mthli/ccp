@@ -23,7 +23,23 @@ ccp.sh "..."  →  interactive TUI  →  subscription pool ✅
 
 ## Installation
 
-_Coming soon._
+### Homebrew
+
+```bash
+brew install mthli/tap/ccp
+```
+
+This pulls in `tmux` and `jq` automatically and puts a `ccp` command on your `PATH`
+(use `ccp` wherever the examples below say `./ccp.sh`).
+You still need [`claude`](https://docs.claude.com/en/docs/claude-code) installed separately and logged in.
+
+### From source
+
+```bash
+git clone https://github.com/mthli/ccp.git
+cd ccp
+./ccp.sh "say hi"
+```
 
 ## Usage
 
