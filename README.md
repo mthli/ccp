@@ -110,7 +110,7 @@ Run `./ccp.sh --help` for the full list of options.
 
 `ccp` is pure bash, with no build step and no dependencies beyond the three tools above.
 
-It coordinates three files:
+It coordinates four files:
 
 - **`ccp.sh`** - the orchestrator.
   Writes a throwaway settings file (your real `~/.claude/settings.json` is never touched),
@@ -119,8 +119,12 @@ It coordinates three files:
   so the TUI never blocks on a y/n box.
 - **`hooks/dump-transcript.sh`** - a `Stop` hook that pulls the final assistant reply out of the transcript
   and signals the orchestrator that it's done.
+- **`hooks/dump-failure.sh`** - a `StopFailure` hook that fires when an API error ends the turn,
+  so ccp stops waiting and exits instead of hanging.
 
-The tmux session and temp files are cleaned up on every exit.
+If you run out of usage, ccp doesn't hang: an API-error turn trips the `StopFailure` hook (exit `5`),
+and a subscription usage-limit wall — which the TUI shows without ending the turn, firing no hook — is
+detected in the pane and exits `4`. The tmux session and temp files are cleaned up on every exit.
 
 ## License
 

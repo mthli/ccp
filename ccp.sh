@@ -15,6 +15,16 @@
 #   CCP_ANSWER_TIMEOUT    Seconds to wait for the answer;
 #                         0 = wait forever                    (default: 0)
 #
+# Exit codes:
+#   0    success
+#   1    runtime failure (session died, answer timeout, bad --settings)
+#   2    usage/CLI error (bad args)
+#   4    usage limit reached — quota/credit/429 block; claude is refusing further
+#        requests until reset (https://code.claude.com/docs/en/errors#usage-limits)
+#   5    turn failed via the StopFailure hook (an API error ended the turn)
+#   127  missing dependency or hook
+#   130  interrupted (SIGINT) / 143 terminated (SIGTERM)
+#
 # Safety:
 #   Your real ~/.claude/settings.json is never touched (a throwaway --settings
 #   file is used); the tmux session and temp dir are cleaned up on any exit.
@@ -252,7 +262,7 @@ HOOK_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)/hooks"
 # emits the permission decision, dump-transcript drives the done sentinel), and a
 # missing or non-executable one fails silently mid-run — the TUI would block on a
 # permission box, or the done sentinel would never appear, hanging us forever.
-for hook in auto-permission.sh dump-transcript.sh; do
+for hook in auto-permission.sh dump-transcript.sh dump-failure.sh; do
   if [ ! -x "$HOOK_DIR/$hook" ]; then
     echo "ccp.sh: required hook not found or not executable: $HOOK_DIR/$hook" >&2
     echo "ccp.sh: ensure hooks/ sits beside ccp.sh and is executable (chmod +x)." >&2
@@ -264,6 +274,8 @@ RUNDIR="$(mktemp -d -t cc-run.XXXXXX)"
 SETTINGS="$RUNDIR/settings.json"
 OUT="$RUNDIR/output.txt"
 DONE="$RUNDIR/done"
+FAIL="$RUNDIR/fail"       # StopFailure sentinel: turn ended on an API error
+FAILMSG="$RUNDIR/failmsg" # the StopFailure error_type, for the message
 SESSION="${SESSION_NAME:-cc-$$}"
 
 # Tunables (override via env if the TUI wording ever changes).
@@ -299,21 +311,34 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# 1) Temp settings: PreToolUse auto-permission + Stop transcript dump. Hook paths
-#    are baked straight into the command lines (no env smuggling through tmux);
-#    each is shell-quoted via shq so a path with spaces or quotes survives when
-#    claude runs it.
-#    Any user `--settings` (file or JSON, repeatable) is deep-merged underneath,
-#    but ccp's PreToolUse/Stop hooks always win: they ARE the mechanism (auto-permission
-#    suppresses the y/n box, dump-transcript drives the done sentinel), so a user
-#    hook for either of those two events is dropped while every other setting —
-#    including other hook events like PostToolUse — is kept.
+# 1) Temp settings: PreToolUse auto-permission + Stop transcript dump + StopFailure
+#    failure trap. Hook paths are baked straight into the command lines (no env
+#    smuggling through tmux); each is shell-quoted via shq so a path with spaces or
+#    quotes survives when claude runs it.
+#    StopFailure fires INSTEAD of Stop when the turn ends on an API error (rate_limit,
+#    billing_error, overloaded, server_error, ...); without it those failures would
+#    never drop the done sentinel and we'd block until the answer-timeout. We want it to
+#    catch EVERY error_type, but the match-all convention for this event isn't verified
+#    (the docs example matches a concrete type), so we register it two ways — matcher "*"
+#    and no matcher at all — so whichever convention holds fires. If both do, dump-failure
+#    just runs twice, which is idempotent (same sentinel files).
+#    Any user `--settings` (file or JSON, repeatable) is deep-merged underneath, but
+#    ccp's PreToolUse/Stop/StopFailure hooks always win: they ARE the mechanism
+#    (auto-permission suppresses the y/n box, dump-transcript drives the done sentinel,
+#    dump-failure drives the fail sentinel), so a user hook for any of those three
+#    events is dropped while every other setting — including other hook events like
+#    PostToolUse — is kept.
 CCP_HOOKS="$(jq -n \
   --arg auto "$(shq "$HOOK_DIR/auto-permission.sh") $AUTO" \
   --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE")" \
+  --arg fail "$(shq "$HOOK_DIR/dump-failure.sh") $(shq "$FAILMSG") $(shq "$FAIL")" \
   '{
     PreToolUse: [{matcher: "*", hooks: [{type: "command", command: $auto}]}],
-    Stop: [{hooks: [{type: "command", command: $stop}]}]
+    Stop: [{hooks: [{type: "command", command: $stop}]}],
+    StopFailure: [
+      {matcher: "*", hooks: [{type: "command", command: $fail}]},
+      {hooks: [{type: "command", command: $fail}]}
+    ]
   }')"
 
 if [ "${#USER_SETTINGS[@]}" -eq 0 ]; then
@@ -382,6 +407,24 @@ SESSION_STARTED=1
 #    grep for "shortcuts" alone — a custom statusline can hide that hint.
 pane() { tmux capture-pane -p -t "$SESSION" 2>/dev/null || true; }
 
+# True if the pane shows a usage-limit / quota wall from the "Usage limits" section
+# of https://code.claude.com/docs/en/errors. The subscription session/weekly/Opus
+# walls make the TUI BLOCK further requests until reset without ending the turn — so
+# no Stop and no StopFailure fires, and the answer-wait below would hang forever
+# (default CCP_ANSWER_TIMEOUT=0). Credit-balance and 429 also land here as a backstop
+# for claude builds without the StopFailure hook.
+#
+# This greps the STREAMING pane, which also holds the pasted prompt and the answer, so
+# the patterns are anchored to the real error chrome to avoid firing on a prompt/answer
+# that merely quotes a limit message: the walls require their "· resets <time>" tail and
+# 429 requires its "API Error:" prefix. It stays a heuristic (a verbatim quote of the
+# full message would still trip it, and a wording change would miss it — CCP_ANSWER_TIMEOUT
+# is the escape hatch); this is the line to adjust if the TUI wording changes. Apostrophe-
+# free so a straight vs. curly "You've" doesn't matter.
+usage_limit_hit() {
+  grep -qiE "hit your (session|weekly|opus) limit.*resets|Credit balance is too low|API Error: Request rejected \(429\)" <<<"$1"
+}
+
 ready=0
 trust_sent=0
 deadline=$(($(date +%s) + CCP_READY_TIMEOUT))
@@ -428,13 +471,39 @@ tmux send-keys -t "$SESSION" Enter
 #    is no sane fixed cap; the answer is whenever the model stops. Ctrl-C / kill
 #    still tear everything down via the trap above. A session crash also breaks
 #    the loop, so "forever" only ever means "until the model finishes or dies".
+#    Two other escapes keep "forever" from being literal when no answer is coming:
+#    the StopFailure hook's fail sentinel (an API error ended the turn) and a
+#    usage-limit wall in the pane (claude is blocking until reset, firing no hook).
+# Report a StopFailure turn and exit 5. Shared by the wait loop and step 6: with a finite
+# CCP_ANSWER_TIMEOUT a failure can land in the window between the deadline passing and the
+# loop re-checking, so step 6 calls this too rather than mislabelling it as a timeout.
+fail_exit() {
+  local etype
+  etype="$(cat "$FAILMSG" 2>/dev/null || true)"
+  echo "ERROR: claude turn failed with an API error (StopFailure: ${etype:-unknown})" >&2
+  exit 5
+}
+
 if [ "${CCP_ANSWER_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
   adeadline=$(($(date +%s) + CCP_ANSWER_TIMEOUT))
 else
   adeadline=0 # 0 = no deadline
 fi
 while [ "$adeadline" -eq 0 ] || [ "$(date +%s)" -lt "$adeadline" ]; do
+  # Fail sentinel BEFORE the done sentinel: StopFailure is expected to fire instead of
+  # Stop on an API error, but if a build ever fired both, preferring fail keeps a failed
+  # turn from being reported as an empty success.
+  [ -f "$FAIL" ] && fail_exit
   [ -f "$DONE" ] && break
+  # Usage-limit wall in the pane. Checked after the fail sentinel so a 429/billing error
+  # that trips both is reported with its precise error_type — though a race (the wall is
+  # on screen before dump-failure writes the sentinel) can still let this win, in which
+  # case the run still exits non-zero, just as 4 rather than 5.
+  if usage_limit_hit "$(pane)"; then
+    echo "ERROR: usage limit reached — claude is blocking further requests until reset." >&2
+    echo "ccp.sh: see https://code.claude.com/docs/en/errors#usage-limits (run 'claude' then /usage)." >&2
+    exit 4
+  fi
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "ERROR: claude session died before answering" >&2
     exit 1
@@ -443,6 +512,7 @@ while [ "$adeadline" -eq 0 ] || [ "$(date +%s)" -lt "$adeadline" ]; do
 done
 
 # 6) Emit result.
+[ -f "$FAIL" ] && fail_exit # a failure that landed right at the deadline beats a timeout
 if [ -f "$DONE" ]; then
   cat "$OUT"
   # An empty answer (the turn ended with no final text — e.g. a trailing tool

@@ -108,7 +108,7 @@ prompt 输入进去，最终答案从 stdout 输出：
 
 `ccp` 是纯 bash，没有构建步骤，除上述三个工具外没有任何依赖。
 
-它协调三个文件：
+它协调四个文件：
 
 - **`ccp.sh`** —— 编排器。
   写出一个一次性的 settings 文件（你真正的 `~/.claude/settings.json` 永不被触碰），
@@ -117,7 +117,11 @@ prompt 输入进去，最终答案从 stdout 输出：
   使 TUI 永不卡在 y/n 询问框上。
 - **`hooks/dump-transcript.sh`** —— 一个 `Stop` hook，从 transcript 中拉取最终的 assistant 回复，
   并通知编排器任务已完成。
+- **`hooks/dump-failure.sh`** —— 一个 `StopFailure` hook，当 API 错误结束本回合时触发，
+  让 ccp 停止等待并退出，而不是挂起。
 
+如果你的用量耗尽，ccp 不会挂起：API 错误的回合会触发 `StopFailure` hook（退出码 `5`），
+而订阅用量上限墙——TUI 会显示它但不结束回合，因此不触发任何 hook——会通过扫描 pane 检测到并以退出码 `4` 退出。
 每次退出时，tmux 会话和临时文件都会被清理。
 
 ## 许可证

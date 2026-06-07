@@ -108,7 +108,7 @@ cd ccp
 
 `ccp`는 순수 bash이며, 빌드 단계가 없고 위의 세 가지 도구 외에 의존성이 없습니다.
 
-세 개의 파일이 협력합니다.
+네 개의 파일이 협력합니다.
 
 - **`ccp.sh`** —— 오케스트레이터.
   일회용 settings 파일을 작성하고(당신의 실제 `~/.claude/settings.json`은 전혀 건드리지 않습니다),
@@ -117,8 +117,12 @@ cd ccp
   TUI가 y/n 확인창에서 멈추지 않게 합니다.
 - **`hooks/dump-transcript.sh`** —— transcript에서 최종 assistant 답변을 꺼내고
   오케스트레이터에 완료를 알리는 `Stop` hook.
+- **`hooks/dump-failure.sh`** —— API 오류로 턴이 끝날 때 실행되는 `StopFailure` hook으로,
+  ccp가 멈춰 기다리지 않고 종료하게 합니다.
 
-tmux 세션과 임시 파일은 종료할 때마다 정리됩니다.
+사용량이 소진되어도 ccp는 멈추지 않습니다. API 오류 턴은 `StopFailure` hook을 실행하며(종료 코드 `5`),
+구독 사용량 한도 벽——TUI는 이를 표시하지만 턴을 끝내지 않아 어떤 hook도 실행되지 않습니다——은
+pane을 스캔해 감지하여 종료 코드 `4`로 종료합니다. tmux 세션과 임시 파일은 종료할 때마다 정리됩니다.
 
 ## 라이선스
 
