@@ -459,10 +459,14 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-# 4) Feed the prompt. load-buffer/paste-buffer is newline-safe (multi-line
-#    prompts won't submit early); send Enter separately to submit.
+# 4) Feed the prompt. -p wraps the buffer in bracketed-paste control codes so the
+#    TUI ingests it as ONE paste (newlines stay literal text, never submits); -r
+#    keeps LF as LF instead of the default LF->CR replacement (a bare CR is
+#    byte-identical to Enter, so without -pr each newline reads as a submit and a
+#    trailing newline + the real Enter get coalesced into the paste, so nothing
+#    submits). The separate Enter below lands outside the bracket -> real submit.
 printf '%s' "$PROMPT" | tmux load-buffer -b ccpaste -
-tmux paste-buffer -b ccpaste -t "$SESSION" -d
+tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
 sleep 0.2
 tmux send-keys -t "$SESSION" Enter
 
