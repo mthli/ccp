@@ -112,18 +112,18 @@ cd ccp
 
 4 つのファイルが連携します。
 
-- **`ccp.sh`** —— オーケストレーター。
+- **`ccp.sh`** - オーケストレーター。
   使い捨ての settings ファイルを書き出し（あなたの本物の `~/.claude/settings.json` は一切触られません）、
   分離された tmux セッションで `claude` を起動し、プロンプトを貼り付け、完了を待ち、回答を出力します。
-- **`hooks/auto-permission.sh`** —— 各権限プロンプトに応答する `PreToolUse` hook。
+- **`hooks/auto-permission.sh`** - 各権限プロンプトに応答する `PreToolUse` hook。
   これにより TUI が y/n の確認ボックスでブロックされることがなくなります。
-- **`hooks/dump-transcript.sh`** —— transcript から最終的な assistant の返答を取り出し、
+- **`hooks/dump-transcript.sh`** - transcript から最終的な assistant の返答を取り出し、
   完了したことをオーケストレーターに知らせる `Stop` hook。
-- **`hooks/dump-failure.sh`** —— API エラーでターンが終了したときに発火する `StopFailure` hook。
+- **`hooks/dump-failure.sh`** - API エラーでターンが終了したときに発火する `StopFailure` hook。
   ccp が待機をやめて、ハングせずに終了できるようにします。
 
 使用量を使い切っても ccp はハングしません。API エラーのターンは `StopFailure` hook を発火させ（終了コード `5`）、
-サブスクリプションの使用量上限の壁——TUI はそれを表示しますがターンを終了させず、どの hook も発火しません——は
+サブスクリプションの使用量上限の壁（TUI はそれを表示しますがターンを終了させず、どの hook も発火しません）は
 pane をスキャンして検出し、終了コード `4` で終了します。tmux セッションと一時ファイルは、終了のたびにクリーンアップされます。
 
 ## ライセンス
