@@ -1,5 +1,7 @@
 # ccp
 
+[English](README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md)
+
 ヘッドレスモードを使わない Claude Code のヘッドレス自動化 👀
 
 ## これは何か

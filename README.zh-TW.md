@@ -1,5 +1,7 @@
 # ccp
 
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
+
 無需 headless 模式的 Claude Code headless 自動化 👀
 
 ## 這是什麼
