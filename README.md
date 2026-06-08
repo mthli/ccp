@@ -102,6 +102,7 @@ Everything after `--` is forwarded verbatim to the underlying `claude`, so its o
 | Variable             | Default | Meaning                                             |
 | -------------------- | ------- | --------------------------------------------------- |
 | `CCP_READY_TIMEOUT`  | `60`    | Seconds to wait for the input box to appear.        |
+| `CCP_SUBMIT_TIMEOUT` | `10`    | Seconds to resend Enter until the prompt submits.   |
 | `CCP_ANSWER_TIMEOUT` | `0`     | Seconds to wait for the answer; `0` = wait forever. |
 
 Run `./ccp.sh --help` for the full list of options.
