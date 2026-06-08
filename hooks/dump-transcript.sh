@@ -14,20 +14,50 @@
 # naive `last text` because it keeps multi-block final answers and survives an
 # answer that resumes after a tool call. Sidechain (subagent) lines excluded.
 #
-# Not every Stop is final. When the turn only paused because a backgrounded
-# Workflow or subagent is still in flight, this Stop fires now, but that task
-# later wakes a fresh turn that produces the real answer. Claude Code reports
-# in-flight work in the Stop payload's `background_tasks` array, each entry tagged
-# with a `type` ('workflow', 'subagent', 'shell', 'monitor', ...). We hold the run
-# open only for the types that re-enter the agent with a real answer — `workflow`
-# and `subagent` — exiting WITHOUT dropping the done sentinel so the orchestrator
-# keeps waiting; the final Stop (none of those left) is the one that writes OUT
-# and touches DONE. Other types are NOT awaited on purpose: a `run_in_background`
-# `shell` or a `monitor` watch is typically fire-and-forget or long-running, so
-# blocking on it would hang the run while the agent already considers its turn
-# done. The separate `session_crons` array is ignored for the same reason — a
-# scheduled cron is future work, not this turn's pending answer. Older claude
-# builds omit `background_tasks`; it reads as empty, so behaviour is unchanged.
+# Not every Stop is final. When the turn only paused because a backgrounded task
+# is still in flight, this Stop fires now, but that task later wakes a fresh turn
+# that produces the real answer. Claude Code reports in-flight work in the Stop
+# payload's `background_tasks` array; each entry has a `type` (a friendly label)
+# and a `status` ('pending'|'running'|'completed'|'failed'|'killed'|'paused'). The
+# binary maps its internal task kinds to these friendly labels (verified against
+# the hook-input schema + the label map in the 2.1.x binary):
+#   local_agent -> subagent
+#   local_workflow -> workflow
+#   local_bash -> shell
+#   in_process_teammate -> teammate
+#   remote_agent -> "cloud session"
+#   monitor_mcp -> monitor
+#   mcp_task -> "MCP task"
+#   dream -> dream
+#
+# We hold the run open (exit WITHOUT dropping the done sentinel, so the orchestrator
+# keeps waiting) for the WAKE-CAPABLE types — the finite ones that re-enter the
+# agent with the real answer: `subagent`, `workflow`, `shell`, `teammate`, and
+# `cloud session` — but only while their `status` is running/pending. The final
+# Stop (none of those left) is the one that writes OUT and touches DONE.
+#
+# `shell` is the subtle one (and was NOT awaited before — that dropped the answer):
+# a backgrounded Bash (`run_in_background: true`, e.g. a long-running command)
+# re-enters the agent via a task-notification when it EXITS, but only in an
+# interactive session — claude's own Bash docs note a headless `-p` run is never
+# resumed. ccp drives the interactive TUI, so the wake fires; tearing the session
+# down at the first Stop killed it before it could wake the consuming turn. The
+# `status` gate keeps
+# awaiting-shells safe: a `paused` shell, and (on builds that leave finished tasks
+# in the array) a `completed`/`failed`/`killed` one, are not awaited, so a finite
+# command the agent ignored never holds the run open. Caveat — a turn-boundary
+# race remains: if a task finishes in the same instant the turn ends with its wake
+# still queued, the gate can drop done one Stop early; this is inherent (it applies
+# to workflow/subagent too) and not introduced by the status gate.
+#
+# NOT awaited, on purpose: `monitor` (an MCP watch) and `MCP task` (a generic async
+# MCP task) — both can fire on a condition or run open-endedly, so awaiting them
+# risks hanging the run forever; `dream` (background reflection, never the user's
+# answer); the sibling `session_crons` array (future scheduled work); and a
+# backgrounded process that never exits (a dev server stays `running`, so the run
+# waits on it until CCP_ANSWER_TIMEOUT — the deliberate cost of awaiting shells).
+# Older claude builds omit `background_tasks` (reads as empty) or a task's `status`
+# (treated as running, i.e. awaited) — both keep the prior behaviour.
 set -euo pipefail
 
 OUT="${1:?usage: dump-transcript.sh <out_file> <done_file>}"
@@ -35,14 +65,22 @@ DONE="${2:?usage: dump-transcript.sh <out_file> <done_file>}"
 
 INPUT="$(cat || true)"
 
-# Background-work gate (see header): if a `workflow`/`subagent` background task is
-# still in flight, this Stop is a pause, not the final answer — exit without
-# signalling done so the orchestrator waits for the turn the completing task
-# wakes. Other types (`shell`, `monitor`, ...) are not counted, so a fire-and-
-# forget background process never holds the run open. `// []` keeps older builds
-# (no field) on the normal path; the guards leave us on the normal path on any
-# jq/parse hiccup rather than swallowing the answer.
-if [ "$(jq -r '[(.background_tasks // [])[] | select(.type == "workflow" or .type == "subagent")] | length' <<<"$INPUT" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; then
+# Background-work gate (see the header for the full type/status model): withhold
+# done while a wake-capable task — `subagent`, `workflow`, `shell`, `teammate`, or
+# `cloud session` — is still `running`/`pending`, so the orchestrator waits for the
+# turn that task wakes instead of ending on this pause. `monitor`/`MCP task`/`dream`
+# are excluded (a watch / open-ended async task / reflection never delivers this
+# turn's one answer). `// []` keeps older builds (no field) on the normal path;
+# `.status // "running"` treats a status-less entry as awaited (prior behaviour);
+# `index` is truthy for a match (including index 0). The guards keep us on the
+# normal path on any jq hiccup rather than swallowing the answer.
+GATE='[(.background_tasks // [])[]
+  | (.status // "running") as $s
+  | .type as $t
+  | select(($s == "running" or $s == "pending")
+           and (["subagent", "workflow", "shell", "teammate", "cloud session"] | index($t)))
+] | length'
+if [ "$(jq -r "$GATE" <<<"$INPUT" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; then
   exit 0
 fi
 

@@ -471,12 +471,14 @@ sleep 0.2
 tmux send-keys -t "$SESSION" Enter
 
 # 5) Wait for the Stop hook to drop the done sentinel. The hook withholds it on
-#    any intermediate Stop where a backgrounded Workflow or subagent is still in
-#    flight (the task types that wake a follow-up turn with the real answer), so a
-#    turn that parks on one does not end the run early — we wait for the Stop that
-#    fires once it completes and the agent processes the result. A backgrounded
-#    shell or monitor watch is not awaited (it may never finish), so it never
-#    holds the run open.
+#    any intermediate Stop where a wake-capable backgrounded task is still running
+#    (subagent / workflow / shell / teammate / cloud session — the kinds that wake
+#    a follow-up turn with the real answer), so a turn that parks on one does not
+#    end the run early — we wait for the Stop that fires once it completes and the
+#    agent processes the result. A backgrounded shell wakes the agent on exit only
+#    in an interactive session (which this is); every awaited type is held only
+#    while running/pending, so a finished one never holds the run open. A monitor /
+#    MCP task / dream is not awaited (it may fire on a condition or never finish).
 #    CCP_ANSWER_TIMEOUT=0 waits forever — input complexity is unbounded, so there
 #    is no sane fixed cap; the answer is whenever the model stops. Ctrl-C / kill
 #    still tear everything down via the trap above. A session crash also breaks
