@@ -278,15 +278,16 @@ RUNDIR="$(mktemp -d -t cc-run.XXXXXX)"
 SETTINGS="$RUNDIR/settings.json"
 OUT="$RUNDIR/output.txt"
 DONE="$RUNDIR/done"
-FAIL="$RUNDIR/fail"       # StopFailure sentinel: turn ended on an API error
-FAILMSG="$RUNDIR/failmsg" # the StopFailure error_type, for the message
-ASKQ="$RUNDIR/askq"       # AskUserQuestion sentinel: turn needs interactive input
-ASKQMSG="$RUNDIR/askqmsg" # the AskUserQuestion question(s) text, for the message
+FAIL="$RUNDIR/fail"           # StopFailure sentinel: turn ended on an API error
+FAILMSG="$RUNDIR/failmsg"     # the StopFailure error_type, for the message
+ASKQ="$RUNDIR/askq"           # AskUserQuestion sentinel: turn needs interactive input
+ASKQMSG="$RUNDIR/askqmsg"     # the AskUserQuestion question(s) text, for the message
+SUBMITTED="$RUNDIR/submitted" # UserPromptSubmit sentinel: the prompt actually reached the model
 SESSION="${SESSION_NAME:-cc-$$}"
 
 # Tunables (override via env if the TUI wording ever changes).
 CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"   # seconds to wait for the input box
-CCP_SUBMIT_TIMEOUT="${CCP_SUBMIT_TIMEOUT:-10}" # seconds to keep resending Enter until submit
+CCP_SUBMIT_TIMEOUT="${CCP_SUBMIT_TIMEOUT:-10}" # seconds to confirm submit (resend Enter / re-paste) before giving up
 CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-0}"  # seconds to wait for the answer; 0 = forever
 
 # `ask` defers each tool call to the TUI's permission box, but this session is
@@ -329,12 +330,20 @@ trap 'exit 143' TERM
 #    (the docs example matches a concrete type), so we register it two ways — matcher "*"
 #    and no matcher at all — so whichever convention holds fires. If both do, dump-failure
 #    just runs twice, which is idempotent (same sentinel files).
+#    A fourth hook, UserPromptSubmit, just touches a `submitted` sentinel — it fires
+#    only when a prompt actually reaches the model, which is how step 4 confirms the
+#    submit landed (a paste mangled to whitespace is discarded with no UserPromptSubmit,
+#    so the sentinel stays absent). It is an inline `touch ... || true` (the `|| true`
+#    guarantees exit 0 so the hook can never block the prompt) and emits no stdout, so
+#    it injects no context into the turn.
 #    Any user `--settings` (file or JSON, repeatable) is deep-merged underneath, but
 #    ccp's PreToolUse/Stop/StopFailure hooks always win: they ARE the mechanism
 #    (auto-permission suppresses the y/n box, dump-transcript drives the done sentinel,
 #    dump-failure drives the fail sentinel), so a user hook for any of those three
 #    events is dropped while every other setting — including other hook events like
-#    PostToolUse — is kept.
+#    PostToolUse — is kept. ccp's UserPromptSubmit touch is the one exception that is
+#    APPENDED rather than override: a user's own UserPromptSubmit hook still runs
+#    alongside it (ours is purely additive — a file touch).
 CCP_HOOKS="$(jq -n \
   --arg auto "$(shq "$HOOK_DIR/auto-permission.sh") $AUTO $(shq "$ASKQ") $(shq "$ASKQMSG")" \
   --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE")" \
@@ -347,9 +356,16 @@ CCP_HOOKS="$(jq -n \
       {hooks: [{type: "command", command: $fail}]}
     ]
   }')"
+# UserPromptSubmit is kept separate so it can be APPENDED to any user-supplied
+# UserPromptSubmit hooks instead of overriding them (the three above must win, this
+# one need not).
+CCP_UPS="$(jq -n \
+  --arg submit "touch $(shq "$SUBMITTED") || true" \
+  '[{hooks: [{type: "command", command: $submit}]}]')"
 
 if [ "${#USER_SETTINGS[@]}" -eq 0 ]; then
-  jq -n --argjson ccp "$CCP_HOOKS" '{hooks: $ccp}' >"$SETTINGS"
+  jq -n --argjson ccp "$CCP_HOOKS" --argjson ups "$CCP_UPS" \
+    '{hooks: ($ccp + {UserPromptSubmit: $ups})}' >"$SETTINGS"
 else
   # Resolve each --settings value (existing path → file contents, else treat as
   # an inline JSON string, matching claude's own rule), validate, then deep-merge
@@ -370,9 +386,10 @@ else
     merge_inputs+=("$content")
   done
   printf '%s\n' "${merge_inputs[@]}" |
-    jq -s --argjson ccp "$CCP_HOOKS" '
+    jq -s --argjson ccp "$CCP_HOOKS" --argjson ups "$CCP_UPS" '
       reduce .[] as $s ({}; . * $s)
       | .hooks = ((.hooks // {}) * $ccp)
+      | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + $ups)
     ' >"$SETTINGS"
 fi
 
@@ -475,37 +492,35 @@ fi
 printf '%s' "$PROMPT" | tmux load-buffer -b ccpaste -
 tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
 
-# Submit, but resend Enter until the prompt actually leaves the input box. A
-# single Enter can be swallowed: right after a big paste the TUI has a brief
-# settle window where it ignores a submit Enter (the "a paste ending in a newline
-# must not auto-submit" guard), and under CPU contention (e.g. two ccp sessions
-# launched the same instant) the one fixed-delay Enter lands inside that window —
-# the prompt then sits unsent and the run hangs forever on the answer-wait. So
-# resend Enter until the box clears.
+# Submit. The box going empty is NOT trusted as proof of submission: a single Enter
+# can be swallowed (right after a big paste the TUI has a settle window that ignores a
+# submit Enter — its "a paste ending in a newline must not auto-submit" guard), AND,
+# worse, under CPU contention (e.g. two ccp sessions launched the same instant) a paste
+# can land mangled to whitespace, which the TUI silently DISCARDS with no turn — also
+# emptying the box. The old "empty == submitted" read then advanced to the answer-wait
+# and hung forever on a turn that never started.
 #
-# Detection is three-state — empty -> NON-empty (paste landed) -> empty (submitted)
-# — never a bare "is the box empty". The readiness gate left the box empty and the
-# pane render lags the paste, so under that same contention the first capture can
-# still show the stale pre-paste empty frame; a bare empty test would read that as
-# a "submit" that never happened and re-hang the very case we fix. So stage 1 first
-# waits for the paste to render (box goes non-empty, no Enter sent yet — the only
-# thing that submits is our Enter, so the box can't clear on its own meanwhile),
-# then stage 2 resends Enter and treats a RETURN to empty as the submit. An empty ❯
-# line is unambiguous once the paste is in — and unlike the "[Pasted text]"
-# placeholder (which a short single-line prompt never gets) the empty box appears
-# for every prompt. Resending is safe: Enter on an already-empty box is a TUI no-op
-# (so a resend after a late submit can't double-send), and the \r always trails the
-# paste-end in byte order (so a resend can't get coalesced into the paste).
+# So success is gated on GROUND TRUTH: the UserPromptSubmit hook's `submitted` sentinel
+# (step 1), which fires (~tens of ms) only when a prompt really reaches the model and
+# never on a discarded paste. While it is absent we keep nudging within CCP_SUBMIT_TIMEOUT
+# — send Enter whenever the box shows content (the paste rendered), and if the box stays
+# empty with no sentinel past a grace, the paste was dropped/discarded, so Ctrl-U (clear
+# any residue) and re-paste. If the sentinel never lands, exit 1 rather than hang to
+# CCP_ANSWER_TIMEOUT (default 0) — a clean, retryable failure instead of a silent wedge.
 #
-# The non-empty gate also guards a menu race: were a turn to open an interactive
-# AskUserQuestion the box would read "❯ 1. ..." (non-empty) and a resent Enter would
-# pick the default. auto-permission now denies AskUserQuestion outright (step 1), so
-# that box never renders — but the gate is belt-and-suspenders regardless: a turn
-# must pass through an empty box on start, which ends the loop first, so any menu is
-# only reached after we have stopped resending. If the box never clears, exit 1
-# rather than hang to CCP_ANSWER_TIMEOUT (default 0).
+# The sentinel check sits at the top and breaks immediately, so a real submit (sentinel
+# in ~tens of ms, measured ~66ms) always wins long before the ~3s re-paste grace — the
+# grace is deliberately ~45x that latency so even a hook-dispatch stall under the same
+# heavy contention that mangled the paste can't make us re-paste AFTER a real submit
+# (which would queue the prompt as a second turn). The nudges therefore only ever act on
+# a genuinely unsent box, so a resend/re-paste can never double-submit a live turn (and
+# Ctrl-U makes the re-paste idempotent: a slow-rendering original paste cannot
+# concatenate with the retry). Enter is only ever sent on a NON-empty box, so it never
+# fires against the stale pre-paste empty frame, and never picks the default on an
+# interactive menu (which auto-permission's AskUserQuestion deny prevents from rendering
+# anyway, and which a turn could only reach long after the sentinel broke this loop).
 submitted=0
-pasted=0
+empty_streak=0
 sdeadline=$(($(date +%s) + CCP_SUBMIT_TIMEOUT))
 while [ "$(date +%s)" -lt "$sdeadline" ]; do
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -513,26 +528,36 @@ while [ "$(date +%s)" -lt "$sdeadline" ]; do
     pane >&2
     exit 1
   fi
-  empty=0
-  grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$(pane)" && empty=1
-  # Stage 1: wait for the paste to render (box goes non-empty) before any Enter —
-  # an empty read here is the stale pre-paste frame, not a submit. The 0.2s also
-  # gives the freshly-rendered paste a beat to settle before stage 2's first Enter.
-  if [ "$pasted" -eq 0 ]; then
-    [ "$empty" -eq 0 ] && pasted=1
-    sleep 0.2
-    continue
-  fi
-  # Stage 2: paste is in. A return to empty means it submitted; else resend Enter.
-  if [ "$empty" -eq 1 ]; then
+  # Ground truth: a prompt really reached the model.
+  if [ -f "$SUBMITTED" ]; then
     submitted=1
     break
   fi
+  if grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$(pane)"; then
+    # Box empty (or whitespace-only, which renders the same) and no sentinel. Could be
+    # the stale pre-paste / still-rendering frame, or a discarded/dropped paste. Hold
+    # for a grace, then re-paste — well past any real render lag, and a real submit's
+    # sentinel would have broken the loop by now.
+    empty_streak=$((empty_streak + 1))
+    if [ "$empty_streak" -ge 15 ]; then # ~3s empty with no UserPromptSubmit -> re-paste
+      tmux send-keys -t "$SESSION" C-u
+      printf '%s' "$PROMPT" | tmux load-buffer -b ccpaste -
+      tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
+      empty_streak=0
+    fi
+    sleep 0.2
+    continue
+  fi
+  # Box shows content: the paste rendered. (Re)send Enter to submit it — repeatedly if
+  # the first is swallowed by the post-paste settle window (the box stays non-empty).
+  # Safe to resend: the \r always trails the paste-end in byte order, so it can't get
+  # coalesced into the paste.
+  empty_streak=0
   tmux send-keys -t "$SESSION" Enter
   sleep 0.3
 done
 if [ "$submitted" -ne 1 ]; then
-  echo "ERROR: prompt never submitted within ${CCP_SUBMIT_TIMEOUT}s (Enter kept being swallowed)" >&2
+  echo "ERROR: prompt never submitted within ${CCP_SUBMIT_TIMEOUT}s (paste discarded or Enter swallowed)" >&2
   pane >&2
   exit 1
 fi
