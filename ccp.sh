@@ -164,7 +164,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-{ [ "$PROMPT_SET" -eq 1 ] && [ -n "$PROMPT" ]; } || die "missing required <prompt> argument"
+[ "$PROMPT_SET" -eq 1 ] || die "missing required <prompt> argument"
+# Trim leading/trailing whitespace (incl. newlines) before anything else — it is never
+# meaningful in a prompt. This is tidiness, NOT load-bearing for submission: the submit
+# loop sends Enter unconditionally, so a populated box submits no matter how it renders.
+# The one concrete effect is on the re-paste branch's empty-box test below — without the
+# trim, a blank FIRST line on a *non*-collapsed paste leaves the ❯ marker line empty, so
+# that test would misread the box as a dropped paste (it wouldn't actually re-paste —
+# Enter submits first — but the read would be wrong). Standard bash trim via [![:space:]]
+# parameter expansion — [:space:] covers space/tab/newline/CR.
+PROMPT="${PROMPT#"${PROMPT%%[![:space:]]*}"}"
+PROMPT="${PROMPT%"${PROMPT##*[![:space:]]}"}"
+# Re-check AFTER trimming: a whitespace-only prompt now fails HERE with a clean usage
+# error (exit 2) instead of 10s later as a misleading "never submitted" in the submit
+# loop (an empty buffer pastes nothing → no UserPromptSubmit → the submit-timeout fires).
+[ -n "$PROMPT" ] || die "prompt is empty (only whitespace) after trimming"
 
 case "$AUTO" in
 allow | deny | ask) ;;
@@ -502,23 +516,35 @@ tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
 #
 # So success is gated on GROUND TRUTH: the UserPromptSubmit hook's `submitted` sentinel
 # (step 1), which fires (~tens of ms) only when a prompt really reaches the model and
-# never on a discarded paste. While it is absent we keep nudging within CCP_SUBMIT_TIMEOUT
-# — send Enter whenever the box shows content (the paste rendered), and if the box stays
-# empty with no sentinel past a grace, the paste was dropped/discarded, so Ctrl-U (clear
-# any residue) and re-paste. If the sentinel never lands, exit 1 rather than hang to
-# CCP_ANSWER_TIMEOUT (default 0) — a clean, retryable failure instead of a silent wedge.
+# never on a discarded paste. If it never lands we exit 1 within CCP_SUBMIT_TIMEOUT
+# rather than hang to CCP_ANSWER_TIMEOUT (default 0) — a clean, retryable failure
+# instead of a silent wedge.
+#
+# Two nudges run while the sentinel is absent:
+#   1. (Re)send Enter EVERY iteration. It is a no-op on an empty box but submits a
+#      populated one no matter HOW the paste rendered — inline single/multi-line, or
+#      collapsed into a "[Pasted text #N +M lines]" chip on its own line (which leaves
+#      the ❯ marker line empty). We deliberately do NOT gate Enter on "the box looks
+#      non-empty": a collapsed chip and a blank-first-line paste both empty the ❯ line,
+#      and gating on it was exactly what wedged the multi-line daily prompts (Enter
+#      never sent → re-paste loop → 10s timeout). Resending is safe — the \r trails the
+#      paste-end in byte order so it can't be coalesced into the paste, and the sentinel
+#      check at the top breaks the loop within ~tens of ms of a real submit, so at most
+#      one extra Enter ever lands on the cleared/running box (a no-op; it can't pick an
+#      interactive-menu default either — none renders pre-submit, and AskUserQuestion is
+#      denied by auto-permission anyway).
+#   2. Re-paste recovery, kept INDEPENDENT of the Enter above: only when the box is
+#      GENUINELY empty — empty ❯ AND no "[Pasted text" chip — for a grace with no
+#      sentinel does it count as a dropped/discarded paste (the whitespace-mangled
+#      discard above), so Ctrl-U (clear any residue) + re-paste. A chip present means
+#      the paste landed, so we never re-paste over it.
 #
 # The sentinel check sits at the top and breaks immediately, so a real submit (sentinel
-# in ~tens of ms, measured ~66ms) always wins long before the ~3s re-paste grace — the
-# grace is deliberately ~45x that latency so even a hook-dispatch stall under the same
-# heavy contention that mangled the paste can't make us re-paste AFTER a real submit
-# (which would queue the prompt as a second turn). The nudges therefore only ever act on
-# a genuinely unsent box, so a resend/re-paste can never double-submit a live turn (and
-# Ctrl-U makes the re-paste idempotent: a slow-rendering original paste cannot
-# concatenate with the retry). Enter is only ever sent on a NON-empty box, so it never
-# fires against the stale pre-paste empty frame, and never picks the default on an
-# interactive menu (which auto-permission's AskUserQuestion deny prevents from rendering
-# anyway, and which a turn could only reach long after the sentinel broke this loop).
+# measured ~66ms) always wins long before the ~3s re-paste grace — deliberately ~45x
+# that latency, so even a hook-dispatch stall under the same heavy contention that
+# mangled the paste can't make us re-paste AFTER a real submit (which would queue the
+# prompt as a second turn). Ctrl-U also makes the re-paste idempotent: a slow-rendering
+# original paste cannot concatenate with the retry.
 submitted=0
 empty_streak=0
 sdeadline=$(($(date +%s) + CCP_SUBMIT_TIMEOUT))
@@ -528,32 +554,28 @@ while [ "$(date +%s)" -lt "$sdeadline" ]; do
     pane >&2
     exit 1
   fi
-  # Ground truth: a prompt really reached the model.
+  # Ground truth: a prompt really reached the model. Top of the loop so it always wins
+  # the race against the re-paste grace below.
   if [ -f "$SUBMITTED" ]; then
     submitted=1
     break
   fi
-  if grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$(pane)"; then
-    # Box empty (or whitespace-only, which renders the same) and no sentinel. Could be
-    # the stale pre-paste / still-rendering frame, or a discarded/dropped paste. Hold
-    # for a grace, then re-paste — well past any real render lag, and a real submit's
-    # sentinel would have broken the loop by now.
+  P="$(pane)"
+  # Nudge 1: always (re)send Enter — no-op on an empty box, submits a populated one
+  # regardless of how the paste rendered. Submission never depends on reading the ❯ line.
+  tmux send-keys -t "$SESSION" Enter
+  # Nudge 2: re-paste only on a genuinely empty box (empty ❯ AND no paste chip).
+  if grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$P" && ! grep -qF '[Pasted text' <<<"$P"; then
     empty_streak=$((empty_streak + 1))
-    if [ "$empty_streak" -ge 15 ]; then # ~3s empty with no UserPromptSubmit -> re-paste
+    if [ "$empty_streak" -ge 10 ]; then # ~3s empty with no UserPromptSubmit -> re-paste
       tmux send-keys -t "$SESSION" C-u
       printf '%s' "$PROMPT" | tmux load-buffer -b ccpaste -
       tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
       empty_streak=0
     fi
-    sleep 0.2
-    continue
+  else
+    empty_streak=0
   fi
-  # Box shows content: the paste rendered. (Re)send Enter to submit it — repeatedly if
-  # the first is swallowed by the post-paste settle window (the box stays non-empty).
-  # Safe to resend: the \r always trails the paste-end in byte order, so it can't get
-  # coalesced into the paste.
-  empty_streak=0
-  tmux send-keys -t "$SESSION" Enter
   sleep 0.3
 done
 if [ "$submitted" -ne 1 ]; then
