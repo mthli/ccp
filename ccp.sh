@@ -12,6 +12,8 @@
 #
 # Environment overrides:
 #   CCP_READY_TIMEOUT     Seconds to wait for the input box   (default: 60)
+#   CCP_SUBMIT_TIMEOUT    Seconds to keep resending Enter
+#                         until the prompt submits            (default: 10)
 #   CCP_ANSWER_TIMEOUT    Seconds to wait for the answer;
 #                         0 = wait forever                    (default: 0)
 #
@@ -279,8 +281,9 @@ FAILMSG="$RUNDIR/failmsg" # the StopFailure error_type, for the message
 SESSION="${SESSION_NAME:-cc-$$}"
 
 # Tunables (override via env if the TUI wording ever changes).
-CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"  # seconds to wait for the input box
-CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-0}" # seconds to wait for the answer; 0 = forever
+CCP_READY_TIMEOUT="${CCP_READY_TIMEOUT:-60}"   # seconds to wait for the input box
+CCP_SUBMIT_TIMEOUT="${CCP_SUBMIT_TIMEOUT:-10}" # seconds to keep resending Enter until submit
+CCP_ANSWER_TIMEOUT="${CCP_ANSWER_TIMEOUT:-0}"  # seconds to wait for the answer; 0 = forever
 
 # `ask` defers each tool call to the TUI's permission box, but this session is
 # detached — no one is there to answer it. Combined with the default forever
@@ -464,11 +467,69 @@ fi
 #    keeps LF as LF instead of the default LF->CR replacement (a bare CR is
 #    byte-identical to Enter, so without -pr each newline reads as a submit and a
 #    trailing newline + the real Enter get coalesced into the paste, so nothing
-#    submits). The separate Enter below lands outside the bracket -> real submit.
+#    submits). The Enter(s) below land outside the bracket -> real submit.
 printf '%s' "$PROMPT" | tmux load-buffer -b ccpaste -
 tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
-sleep 0.2
-tmux send-keys -t "$SESSION" Enter
+
+# Submit, but resend Enter until the prompt actually leaves the input box. A
+# single Enter can be swallowed: right after a big paste the TUI has a brief
+# settle window where it ignores a submit Enter (the "a paste ending in a newline
+# must not auto-submit" guard), and under CPU contention (e.g. two ccp sessions
+# launched the same instant) the one fixed-delay Enter lands inside that window —
+# the prompt then sits unsent and the run hangs forever on the answer-wait. So
+# resend Enter until the box clears.
+#
+# Detection is three-state — empty -> NON-empty (paste landed) -> empty (submitted)
+# — never a bare "is the box empty". The readiness gate left the box empty and the
+# pane render lags the paste, so under that same contention the first capture can
+# still show the stale pre-paste empty frame; a bare empty test would read that as
+# a "submit" that never happened and re-hang the very case we fix. So stage 1 first
+# waits for the paste to render (box goes non-empty, no Enter sent yet — the only
+# thing that submits is our Enter, so the box can't clear on its own meanwhile),
+# then stage 2 resends Enter and treats a RETURN to empty as the submit. An empty ❯
+# line is unambiguous once the paste is in — and unlike the "[Pasted text]"
+# placeholder (which a short single-line prompt never gets) the empty box appears
+# for every prompt. Resending is safe: Enter on an already-empty box is a TUI no-op
+# (so a resend after a late submit can't double-send), and the \r always trails the
+# paste-end in byte order (so a resend can't get coalesced into the paste).
+#
+# The non-empty gate also covers a menu race: if the turn opens an interactive
+# AskUserQuestion the box reads "❯ 1. ..." (non-empty) and a resent Enter would
+# pick the default — but a turn must pass through an empty box on start, which ends
+# the loop first, so the menu is only reached after we have stopped resending. If
+# the box never clears, exit 1 rather than hang to CCP_ANSWER_TIMEOUT (default 0).
+submitted=0
+pasted=0
+sdeadline=$(($(date +%s) + CCP_SUBMIT_TIMEOUT))
+while [ "$(date +%s)" -lt "$sdeadline" ]; do
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "ERROR: claude session died while submitting the prompt" >&2
+    pane >&2
+    exit 1
+  fi
+  empty=0
+  grep -qE '^[[:space:]]*❯[[:space:]]*$' <<<"$(pane)" && empty=1
+  # Stage 1: wait for the paste to render (box goes non-empty) before any Enter —
+  # an empty read here is the stale pre-paste frame, not a submit. The 0.2s also
+  # gives the freshly-rendered paste a beat to settle before stage 2's first Enter.
+  if [ "$pasted" -eq 0 ]; then
+    [ "$empty" -eq 0 ] && pasted=1
+    sleep 0.2
+    continue
+  fi
+  # Stage 2: paste is in. A return to empty means it submitted; else resend Enter.
+  if [ "$empty" -eq 1 ]; then
+    submitted=1
+    break
+  fi
+  tmux send-keys -t "$SESSION" Enter
+  sleep 0.3
+done
+if [ "$submitted" -ne 1 ]; then
+  echo "ERROR: prompt never submitted within ${CCP_SUBMIT_TIMEOUT}s (Enter kept being swallowed)" >&2
+  pane >&2
+  exit 1
+fi
 
 # 5) Wait for the Stop hook to drop the done sentinel. The hook withholds it on
 #    any intermediate Stop where a wake-capable backgrounded task is still running
