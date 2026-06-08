@@ -24,6 +24,8 @@
 #   4    usage limit reached — quota/credit/429 block; claude is refusing further
 #        requests until reset (https://code.claude.com/docs/en/errors#usage-limits)
 #   5    turn failed via the StopFailure hook (an API error ended the turn)
+#   6    turn needs interactive input — the model called AskUserQuestion, which a
+#        detached headless run cannot answer (allow mode only; see step 5)
 #   127  missing dependency or hook
 #   130  interrupted (SIGINT) / 143 terminated (SIGTERM)
 #
@@ -278,6 +280,8 @@ OUT="$RUNDIR/output.txt"
 DONE="$RUNDIR/done"
 FAIL="$RUNDIR/fail"       # StopFailure sentinel: turn ended on an API error
 FAILMSG="$RUNDIR/failmsg" # the StopFailure error_type, for the message
+ASKQ="$RUNDIR/askq"       # AskUserQuestion sentinel: turn needs interactive input
+ASKQMSG="$RUNDIR/askqmsg" # the AskUserQuestion question(s) text, for the message
 SESSION="${SESSION_NAME:-cc-$$}"
 
 # Tunables (override via env if the TUI wording ever changes).
@@ -332,7 +336,7 @@ trap 'exit 143' TERM
 #    events is dropped while every other setting — including other hook events like
 #    PostToolUse — is kept.
 CCP_HOOKS="$(jq -n \
-  --arg auto "$(shq "$HOOK_DIR/auto-permission.sh") $AUTO" \
+  --arg auto "$(shq "$HOOK_DIR/auto-permission.sh") $AUTO $(shq "$ASKQ") $(shq "$ASKQMSG")" \
   --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE")" \
   --arg fail "$(shq "$HOOK_DIR/dump-failure.sh") $(shq "$FAILMSG") $(shq "$FAIL")" \
   '{
@@ -493,11 +497,13 @@ tmux paste-buffer -pr -b ccpaste -t "$SESSION" -d
 # (so a resend after a late submit can't double-send), and the \r always trails the
 # paste-end in byte order (so a resend can't get coalesced into the paste).
 #
-# The non-empty gate also covers a menu race: if the turn opens an interactive
-# AskUserQuestion the box reads "❯ 1. ..." (non-empty) and a resent Enter would
-# pick the default — but a turn must pass through an empty box on start, which ends
-# the loop first, so the menu is only reached after we have stopped resending. If
-# the box never clears, exit 1 rather than hang to CCP_ANSWER_TIMEOUT (default 0).
+# The non-empty gate also guards a menu race: were a turn to open an interactive
+# AskUserQuestion the box would read "❯ 1. ..." (non-empty) and a resent Enter would
+# pick the default. auto-permission now denies AskUserQuestion outright (step 1), so
+# that box never renders — but the gate is belt-and-suspenders regardless: a turn
+# must pass through an empty box on start, which ends the loop first, so any menu is
+# only reached after we have stopped resending. If the box never clears, exit 1
+# rather than hang to CCP_ANSWER_TIMEOUT (default 0).
 submitted=0
 pasted=0
 sdeadline=$(($(date +%s) + CCP_SUBMIT_TIMEOUT))
@@ -544,9 +550,10 @@ fi
 #    is no sane fixed cap; the answer is whenever the model stops. Ctrl-C / kill
 #    still tear everything down via the trap above. A session crash also breaks
 #    the loop, so "forever" only ever means "until the model finishes or dies".
-#    Two other escapes keep "forever" from being literal when no answer is coming:
-#    the StopFailure hook's fail sentinel (an API error ended the turn) and a
-#    usage-limit wall in the pane (claude is blocking until reset, firing no hook).
+#    Three other escapes keep "forever" from being literal when no answer is coming:
+#    the StopFailure hook's fail sentinel (an API error ended the turn), a
+#    usage-limit wall in the pane (claude is blocking until reset, firing no hook),
+#    and the AskUserQuestion sentinel (the turn needs interactive input we can't give).
 # Report a StopFailure turn and exit 5. Shared by the wait loop and step 6: with a finite
 # CCP_ANSWER_TIMEOUT a failure can land in the window between the deadline passing and the
 # loop re-checking, so step 6 calls this too rather than mislabelling it as a timeout.
@@ -555,6 +562,25 @@ fail_exit() {
   etype="$(cat "$FAILMSG" 2>/dev/null || true)"
   echo "ERROR: claude turn failed with an API error (StopFailure: ${etype:-unknown})" >&2
   exit 5
+}
+
+# Report an AskUserQuestion abort and exit 6. Like fail_exit, shared by the wait loop
+# and step 6 so a question landing right at a finite-timeout deadline isn't mislabelled
+# as a timeout. The sentinel is dropped by auto-permission, which also denied the tool
+# so no choice box ever rendered; we surface the recorded question(s) so the caller can
+# refine the prompt rather than guess why the run stopped.
+askq_exit() {
+  local q
+  echo "ERROR: turn needs interactive input — the model called AskUserQuestion, which a" >&2
+  echo "ccp.sh: detached headless run cannot answer." >&2
+  q="$(cat "$ASKQMSG" 2>/dev/null || true)"
+  if [ -n "$q" ]; then
+    echo "ccp.sh: it asked:" >&2
+    printf '%s\n' "$q" >&2
+  fi
+  echo "ccp.sh: refine the prompt so the model can decide without asking (or run attached" >&2
+  echo "ccp.sh: with -p ask), then re-run." >&2
+  exit 6
 }
 
 if [ "${CCP_ANSWER_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
@@ -567,6 +593,10 @@ while [ "$adeadline" -eq 0 ] || [ "$(date +%s)" -lt "$adeadline" ]; do
   # Stop on an API error, but if a build ever fired both, preferring fail keeps a failed
   # turn from being reported as an empty success.
   [ -f "$FAIL" ] && fail_exit
+  # AskUserQuestion before done: its sentinel is dropped mid-turn (the turn continues
+  # after the deny, so a later Stop could still drop done) — surface the question and
+  # abort rather than wait out a turn that needs input we can't give.
+  [ -f "$ASKQ" ] && askq_exit
   [ -f "$DONE" ] && break
   # Usage-limit wall in the pane. Checked after the fail sentinel so a 429/billing error
   # that trips both is reported with its precise error_type — though a race (the wall is
@@ -586,6 +616,7 @@ done
 
 # 6) Emit result.
 [ -f "$FAIL" ] && fail_exit # a failure that landed right at the deadline beats a timeout
+[ -f "$ASKQ" ] && askq_exit # ditto an AskUserQuestion that landed right at the deadline
 if [ -f "$DONE" ]; then
   cat "$OUT"
   # An empty answer (the turn ended with no final text — e.g. a trailing tool
