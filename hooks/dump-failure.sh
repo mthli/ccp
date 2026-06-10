@@ -6,7 +6,11 @@
 # type and drop a separate `fail` sentinel so ccp.sh can stop waiting and exit non-zero.
 #
 # Usage (baked into --settings command line):
-#   dump-failure.sh <msg_file> <sentinel_file>
+#   dump-failure.sh <msg_file> <sentinel_file> [ccp_pid] [session]
+#
+# The optional pair drives the orphan self-destruct at the bottom — same contract
+# as dump-transcript.sh: a failed turn is just as terminal as an answered one, so
+# an orphaned session (ccp SIGKILLed) is reaped here too.
 #
 # StopFailure stdin carries .error_type — the same value its settings matcher filters
 # on (one of: rate_limit, overloaded, authentication_failed, oauth_org_not_allowed,
@@ -29,3 +33,18 @@ ETYPE="$(jq -r '[.error_type, .hookSpecificOutput.error_type, .error.type]
 
 printf '%s\n' "$ETYPE" >"$MSG"
 : >"$SENT" # touch sentinel LAST, so MSG is ready when SENT appears
+
+# Orphan self-destruct (best-effort) — see dump-transcript.sh for the full story.
+# StopFailure ends the turn for good (no later Stop is coming), so if the ccp
+# that launched this run was SIGKILLed there is nobody left to read the fail
+# sentinel or tear the session down; reap our own session. kill -0 probes
+# liveness (same-user, so EPERM also means our ccp is gone); alive → teardown
+# stays ccp's job. Args absent or malformed → no-op.
+CCP_PID="${3:-}"
+CCP_SESSION="${4:-}"
+case "$CCP_PID" in '' | *[!0-9]*) exit 0 ;; esac
+[ -n "$CCP_SESSION" ] || exit 0
+if kill -0 "$CCP_PID" 2>/dev/null; then
+  exit 0 # ccp alive — it reports the failure and kills the session via its trap
+fi
+tmux kill-session -t "$CCP_SESSION" 2>/dev/null || true

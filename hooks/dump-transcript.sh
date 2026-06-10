@@ -3,7 +3,11 @@
 # and signal the outer orchestrator via sentinel files.
 #
 # Usage (baked into --settings command line):
-#   dump-transcript.sh <out_file> <done_file>
+#   dump-transcript.sh <out_file> <done_file> [ccp_pid] [session]
+#
+# The optional pair drives the orphan self-destruct at the bottom: ccp's trap is
+# the only other thing that ever kills the session, so if ccp died untrappably
+# (SIGKILL) the hook reaps its own session once the final answer is recorded.
 #
 # Transcript schema (verified against real ~/.claude/projects/**/*.jsonl):
 #   - one JSONL line per content block
@@ -117,3 +121,26 @@ fi
 
 printf '%s\n' "$LAST" >"$OUT"
 : >"$DONE" # touch completion sentinel LAST, so OUT is ready when DONE appears
+
+# Orphan self-destruct (best-effort): ccp's EXIT/INT/TERM trap is the only other
+# thing that ever runs `tmux kill-session`, and an untrappable SIGKILL skips it —
+# seen in production when a supervisor (pm2) SIGINTs the wrapper shell, which
+# neither dies nor forwards while waiting on ccp, then escalates to a tree-wide
+# SIGKILL. The interactive TUI never exits on its own, so the orphaned session
+# would sit at the input box forever and every later run reusing the -s name
+# would die on ccp's collision check. The sentinel is already down (the answer is
+# complete and recorded), so if the launching ccp is gone there is nobody left to
+# read it or to tear the session down — kill our own session. kill -0 probes
+# liveness; ccp runs as this same user, so EPERM (the PID reused by another
+# user's process) also means our ccp is dead. If ccp is alive, teardown stays its
+# job, as before. Args absent or malformed (manual use, older ccp.sh) → no-op.
+CCP_PID="${3:-}"
+CCP_SESSION="${4:-}"
+case "$CCP_PID" in '' | *[!0-9]*) exit 0 ;; esac
+[ -n "$CCP_SESSION" ] || exit 0
+if kill -0 "$CCP_PID" 2>/dev/null; then
+  exit 0 # ccp alive — it reads OUT and kills the session via its trap
+fi
+# This kills claude (and this hook with it); the sentinel files are already
+# written, so nothing of the run's result is lost.
+tmux kill-session -t "$CCP_SESSION" 2>/dev/null || true

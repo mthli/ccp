@@ -32,6 +32,8 @@
 # Safety:
 #   Your real ~/.claude/settings.json is never touched (a throwaway --settings
 #   file is used); the tmux session and temp dir are cleaned up on any exit.
+#   If ccp itself is killed untrappably (SIGKILL) mid-run, the Stop/StopFailure
+#   hooks self-destruct the orphaned session once the turn completes.
 #
 set -euo pipefail
 
@@ -344,6 +346,13 @@ trap 'exit 143' TERM
 #    (the docs example matches a concrete type), so we register it two ways — matcher "*"
 #    and no matcher at all — so whichever convention holds fires. If both do, dump-failure
 #    just runs twice, which is idempotent (same sentinel files).
+#    Both turn-terminal hooks also get ccp's own PID ($$) and the session name: after
+#    dropping their sentinel they probe the PID with kill -0, and if the ccp that
+#    launched the run is gone they kill the session themselves. ccp's trap is the only
+#    other thing that ever tears the session down, and an untrappable SIGKILL (e.g. a
+#    process supervisor escalating a stop the wrapper shell didn't forward) skips it —
+#    without this, the orphaned interactive TUI would sit at the input box forever and
+#    every later run reusing the -s name would die on the collision check below.
 #    A fourth hook, UserPromptSubmit, just touches a `submitted` sentinel — it fires
 #    only when a prompt actually reaches the model, which is how step 4 confirms the
 #    submit landed (a paste mangled to whitespace is discarded with no UserPromptSubmit,
@@ -360,8 +369,8 @@ trap 'exit 143' TERM
 #    alongside it (ours is purely additive — a file touch).
 CCP_HOOKS="$(jq -n \
   --arg auto "$(shq "$HOOK_DIR/auto-permission.sh") $AUTO $(shq "$ASKQ") $(shq "$ASKQMSG")" \
-  --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE")" \
-  --arg fail "$(shq "$HOOK_DIR/dump-failure.sh") $(shq "$FAILMSG") $(shq "$FAIL")" \
+  --arg stop "$(shq "$HOOK_DIR/dump-transcript.sh") $(shq "$OUT") $(shq "$DONE") $$ $(shq "$SESSION")" \
+  --arg fail "$(shq "$HOOK_DIR/dump-failure.sh") $(shq "$FAILMSG") $(shq "$FAIL") $$ $(shq "$SESSION")" \
   '{
     PreToolUse: [{matcher: "*", hooks: [{type: "command", command: $auto}]}],
     Stop: [{hooks: [{type: "command", command: $stop}]}],
