@@ -141,6 +141,13 @@ case "$CCP_PID" in '' | *[!0-9]*) exit 0 ;; esac
 if kill -0 "$CCP_PID" 2>/dev/null; then
   exit 0 # ccp alive — it reads OUT and kills the session via its trap
 fi
-# This kills claude (and this hook with it); the sentinel files are already
-# written, so nothing of the run's result is lost.
-tmux kill-session -t "$CCP_SESSION" 2>/dev/null || true
+# Reap the rundir too — ccp's trap is the only other thing that removes it, and
+# the sentinel files just written have no reader left. Guarded on the cc-run.*
+# shape ccp's mktemp uses, so a hand-supplied path never gets a recursive rm.
+RUNDIR="$(dirname "$DONE")"
+case "$RUNDIR" in
+*/cc-run.*) rm -rf "$RUNDIR" ;;
+esac
+# Last, since this kills claude (and this hook with it). '=' pins the target to
+# an exact name match — never tmux's prefix fallback.
+tmux kill-session -t "=$CCP_SESSION" 2>/dev/null || true

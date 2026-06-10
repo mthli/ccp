@@ -324,7 +324,7 @@ fi
 SESSION_STARTED=0
 cleanup() {
   if [ "$SESSION_STARTED" -eq 1 ]; then
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    tmux kill-session -t "=$SESSION" 2>/dev/null || true
   fi
   rm -rf "$RUNDIR"
 }
@@ -348,7 +348,8 @@ trap 'exit 143' TERM
 #    just runs twice, which is idempotent (same sentinel files).
 #    Both turn-terminal hooks also get ccp's own PID ($$) and the session name: after
 #    dropping their sentinel they probe the PID with kill -0, and if the ccp that
-#    launched the run is gone they kill the session themselves. ccp's trap is the only
+#    launched the run is gone they remove the rundir and kill the session
+#    themselves. ccp's trap is the only
 #    other thing that ever tears the session down, and an untrappable SIGKILL (e.g. a
 #    process supervisor escalating a stop the wrapper shell didn't forward) skips it —
 #    without this, the orphaned interactive TUI would sit at the input box forever and
@@ -439,7 +440,7 @@ fi
 # A user-supplied -s name can collide with an existing session. Bail before
 # launching — and before SESSION_STARTED flips on — so cleanup never kills a
 # session ccp didn't create. (The default cc-<pid> name is effectively unique.)
-if tmux has-session -t "$SESSION" 2>/dev/null; then
+if tmux has-session -t "=$SESSION" 2>/dev/null; then
   echo "ccp.sh: tmux session '$SESSION' already exists — pick another -s name or kill it first." >&2
   exit 1
 fi
@@ -476,7 +477,7 @@ ready=0
 trust_sent=0
 deadline=$(($(date +%s) + CCP_READY_TIMEOUT))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     echo "ERROR: claude session died during startup" >&2
     pane >&2
     exit 1
@@ -558,7 +559,7 @@ submitted=0
 empty_streak=0
 sdeadline=$(($(date +%s) + CCP_SUBMIT_TIMEOUT))
 while [ "$(date +%s)" -lt "$sdeadline" ]; do
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     echo "ERROR: claude session died while submitting the prompt" >&2
     pane >&2
     exit 1
@@ -663,7 +664,7 @@ while [ "$adeadline" -eq 0 ] || [ "$(date +%s)" -lt "$adeadline" ]; do
     echo "ccp.sh: see https://code.claude.com/docs/en/errors#usage-limits (run 'claude' then /usage)." >&2
     exit 4
   fi
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     echo "ERROR: claude session died before answering" >&2
     exit 1
   fi

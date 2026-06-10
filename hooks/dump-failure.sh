@@ -47,4 +47,11 @@ case "$CCP_PID" in '' | *[!0-9]*) exit 0 ;; esac
 if kill -0 "$CCP_PID" 2>/dev/null; then
   exit 0 # ccp alive — it reports the failure and kills the session via its trap
 fi
-tmux kill-session -t "$CCP_SESSION" 2>/dev/null || true
+# Reap the rundir too (no reader left; guarded on ccp's mktemp shape), then the
+# session last — that kills claude and this hook with it. '=' pins the target to
+# an exact name match — never tmux's prefix fallback.
+RUNDIR="$(dirname "$SENT")"
+case "$RUNDIR" in
+*/cc-run.*) rm -rf "$RUNDIR" ;;
+esac
+tmux kill-session -t "=$CCP_SESSION" 2>/dev/null || true
